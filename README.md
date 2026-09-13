@@ -52,20 +52,26 @@ import corerun
 corerun.init()          # uses ~/.corerun/config
 ```
 
-Where a browser is not available — CI, a container, a headless box — pass the
-token instead, or set it in the environment:
+Where there is no browser — a container, a remote box, a notebook on a cluster
+— log in the same way and approve it from a machine that has one:
 
-```python
-corerun.init(auth_token="cr-xxx", workspace="your-workspace-id")
+```bash
+corerun login --use-device-code
 ```
+
+It prints a code, you approve it in a browser anywhere, and it writes the same
+`~/.corerun/config`. Everything after that works as above, still with no
+credential in your code.
+
+A token is for the case where nobody is present to approve anything — a CI job,
+a cron. Put it in the environment rather than in a call, so it does not end up
+in a file somebody commits:
 
 ```bash
 export CORERUN_AUTH_TOKEN=cr-xxx
 export CORERUN_WORKSPACE=your-workspace-id
 ```
 
-`corerun login --use-device-code` gets you a token from a machine with no
-browser by approving it on one that has.
 
 ### Datasets
 
