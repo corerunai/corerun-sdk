@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "corerun"
+version = "0.1.0"
+description = "Python SDK and CLI for corerun ML Platform"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "corerun Team", email = "support@corerun.ai"}
+]
+keywords = ["machine-learning", "mlops", "datasets", "training", "gpu"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "httpx>=0.25.0",
+    "pydantic>=2.0.0",
+    "rich>=13.0.0",
+    "typer>=0.9.0",
+    "python-dotenv>=1.0.0",
+    "tabulate>=0.9.0",
+]
+
+[project.optional-dependencies]
+mlflow = [
+    "mlflow>=2.10.0",
+]
+all = [
+    "mlflow>=2.10.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+corerun = "corerun.cli:app"
+
+[project.urls]
+Homepage = "https://corerun.ai"
+Documentation = "https://docs.corerun.ai"
+Repository = "https://github.com/corerun/corerun-sdk"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The skills travel with the CLI they drive, so anywhere it is installed can
+# run `corerun skills install`. They are markdown, not code, which is why they
+# have to be named here to be packaged at all.
+[tool.setuptools.package-data]
+corerun = ["skills/*/SKILL.md", "skills/README.md"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311', 'py312']
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "W"]
