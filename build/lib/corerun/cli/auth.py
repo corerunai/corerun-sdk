@@ -2,6 +2,9 @@
 Authentication CLI commands
 """
 
+import os
+from typing import Optional
+
 import typer
 from rich.console import Console
 
@@ -11,6 +14,35 @@ from corerun.config import DEFAULT_API_URL, Config, init, get_config
 
 console = output.console
 app = typer.Typer(help="Authentication commands")
+
+
+def resolve_login_url(explicit: Optional[str]) -> str:
+    """Which platform to sign in to.
+
+    --url, then the environment, then a config file from an earlier login, and
+    only then the default.
+
+    Login used to read none of those: it took --url or a hardcoded default,
+    which happened to be the address most people were using, so nobody noticed.
+    Once the default moved, logging in against a self-hosted deployment
+    silently opened a browser at somebody else's platform -- with
+    CORERUN_API_URL set, and ignored.
+    """
+    return explicit or os.getenv("CORERUN_API_URL") or _configured_api_url() or DEFAULT_API_URL
+
+
+def _configured_api_url() -> Optional[str]:
+    """The api_url a previous login wrote, if there is one.
+
+    Read from the file rather than the live config, because logging in is
+    exactly the moment the live config may be empty or half-initialised.
+    """
+    try:
+        from corerun.config import Config
+
+        return Config.from_file().api_url or None
+    except Exception:
+        return None
 
 
 @app.command()
@@ -32,7 +64,15 @@ def login(
     Example:
         corerun login --token <token> --workspace my-workspace-id
     """
-    resolved_url = api_url or DEFAULT_API_URL
+    # --url, then the environment, then a config file from an earlier login,
+    # and only then the default.
+    #
+    # Login used to read none of those: it took --url or a hardcoded default,
+    # which happened to be the address most people were using, so nobody
+    # noticed. Once the default moved, logging in against a self-hosted
+    # deployment silently opened a browser at somebody else's platform -- with
+    # CORERUN_API_URL set, and ignored.
+    resolved_url = resolve_login_url(api_url)
 
     # With no key given, sign in interactively rather than demanding one be
     # pasted.
@@ -42,6 +82,12 @@ def login(
     # windows. The device flow is what a machine without a usable browser needs
     # -- an SSH session, a notebook terminal -- and is chosen automatically in
     # those cases, or explicitly with --use-device-code.
+
+    # What is already configured, read before anything asks the platform a
+    # question: signing in should be made the same way every other command is
+    # made, and the settings this command does not own survive being saved.
+    config = Config.from_file()
+
     refresh_token = None
     device_workspace = None
     if not auth_token:
@@ -68,15 +114,20 @@ def login(
     # longer names one at all: the token is bound to the person, and the
     # workspace travels per request.
     if not workspace:
-        workspace = workspace_cli.choose(resolved_url, auth_token, default=device_workspace)
+        workspace = workspace_cli.choose(
+            resolved_url, auth_token, default=device_workspace, verify=config.verify_ssl
+        )
 
-    # Create config
-    config = Config(
-        auth_token=auth_token,
-        refresh_token=refresh_token,
-        workspace=workspace,
-        api_url=resolved_url,
-    )
+    # Fill in what this command owns, leaving the rest of the file alone.
+    #
+    # Saving writes a whole file, so a config built from scratch here dropped
+    # everything login does not own: on a self-hosted deployment, signing in
+    # again reset inference_url and verify_ssl to their defaults and the loss
+    # only showed up later, as an address that had stopped resolving.
+    config.auth_token = auth_token
+    config.refresh_token = refresh_token
+    config.workspace = workspace or config.workspace
+    config.api_url = resolved_url
 
     # Test connection
     try:
@@ -105,15 +156,29 @@ def login(
 def logout():
     """
     Remove saved credentials.
+
+    The credentials go; the rest of the file stays. Deleting the file took the
+    deployment's address with it, so signing out of a self-hosted platform
+    quietly pointed the client back at the default -- which is the failure the
+    recorded address exists to prevent. What a logout has to remove is the
+    ability to act as someone, and that is the token.
     """
     from pathlib import Path
 
     config_path = Path.home() / ".corerun" / "config"
-    if config_path.exists():
-        config_path.unlink()
-        console.print("[green]✓[/green] Logged out successfully")
-    else:
+    if not config_path.exists():
         console.print("No saved credentials found")
+        return
+
+    config = Config.from_file(config_path)
+    if not config.auth_token and not config.refresh_token:
+        console.print("No saved credentials found")
+        return
+
+    config.auth_token = None
+    config.refresh_token = None
+    config.save(config_path)
+    console.print("[green]✓[/green] Logged out successfully")
 
 
 @app.command()
@@ -134,6 +199,12 @@ def whoami():
     console.print("[bold]corerun Authentication[/bold]")
     console.print(f"  Auth token: {masked_key}")
     console.print(f"  API URL: {config.api_url}")
+    # Where model endpoints are called. Worth printing because it is the address
+    # a deployment most often gets wrong, and it is otherwise invisible: what
+    # the platform reports per endpoint, or CORERUN_INFERENCE_URL when it is a
+    # host of its own.
+    if config.inference_base:
+        console.print(f"  Model endpoints: {config.inference_base}")
     if config.workspace:
         console.print(f"  Workspace: {config.workspace}")
 

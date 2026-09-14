@@ -28,12 +28,14 @@ Usage:
     print(corerun.endpoints.complete("chat", "chat-large", "Say hello"))
 """
 
+from contextlib import contextmanager
 from typing import Callable, Any, Dict, List, Optional
 
 import httpx
 from pydantic import BaseModel, field_validator
 
 from corerun.config import get_client, get_config
+from corerun.exceptions import ConfigurationError, unreachable
 
 
 def _reply(payload: Dict[str, Any]) -> str:
@@ -72,6 +74,82 @@ def _verify() -> bool:
         return get_config().verify_ssl
     except Exception:  # noqa: BLE001 — no config yet means default behaviour
         return True
+
+
+def _configured_inference_url() -> str:
+    """The address somebody chose for model endpoints, if they chose one."""
+    try:
+        return get_config().inference_url or ""
+    except Exception:  # noqa: BLE001 — no config yet means default behaviour
+        return ""
+
+
+def _derived_inference_base() -> str:
+    """The address the API address implies, for when nothing else supplies one."""
+    try:
+        return get_config().inference_base
+    except Exception:  # noqa: BLE001 — no config yet means default behaviour
+        return ""
+
+
+def _address(endpoint: "Endpoint", path: str) -> str:
+    """The URL to call an endpoint on, host included.
+
+    Three answers, in the order they are trusted.
+
+    An address somebody configured (``inference_url``, ``CORERUN_INFERENCE_URL``)
+    is a decision, and covers the deployment whose callers cannot reach the
+    address the platform reports -- a gateway on a host of its own, a cluster
+    behind a private load balancer. It replaces the base and keeps the path, the
+    path being the platform's routing and the host the part a caller may know
+    better.
+
+    Otherwise the address the platform reports for this endpoint, which it knows
+    better than anything guessed from the API address here.
+
+    And only when it reports none, the address its API address implies -- the
+    deployment's own ``api``-prefixed host.
+    """
+    configured = _configured_inference_url()
+    if configured:
+        return f"{configured.rstrip('/')}/{endpoint.name}{path}"
+
+    if endpoint.url:
+        return f"{endpoint.url}{path}"
+
+    derived = _derived_inference_base()
+    if derived:
+        return f"{derived.rstrip('/')}/{endpoint.name}{path}"
+
+    raise ConfigurationError(
+        f"no address to call the '{endpoint.name}' endpoint on: the platform "
+        f"reports none for it, and none follows from the API address. Set "
+        f"CORERUN_INFERENCE_URL to where this deployment publishes its endpoints."
+    )
+
+
+def _request(http: httpx.Client, method: str, url: str, **kwargs) -> httpx.Response:
+    """Call the gateway, or say which address could not be reached.
+
+    These calls do not go through the SDK's client -- they go to the gateway
+    rather than the management API -- so the address has to be named here too.
+    Otherwise a deployment whose gateway does not resolve reports it the way
+    the resolver worded it, which names no host and suggests nothing.
+    """
+    try:
+        return http.request(method, url, **kwargs)
+    except httpx.ConnectError as e:
+        raise unreachable(url, e, setting="CORERUN_INFERENCE_URL") from e
+
+
+@contextmanager
+def _stream(http: httpx.Client, method: str, url: str, **kwargs):
+    """The same, for a response that is read as it arrives."""
+    try:
+        with http.stream(method, url, **kwargs) as response:
+            yield response
+    except httpx.ConnectError as e:
+        raise unreachable(url, e, setting="CORERUN_INFERENCE_URL") from e
 
 
 class PublishedModel(BaseModel):
@@ -259,8 +337,10 @@ def models(name: str, workspace: Optional[str] = None) -> List[str]:
     """
     endpoint = get(name, workspace=workspace)
     with httpx.Client(timeout=30, verify=_verify()) as http:
-        response = http.get(
-            f"{endpoint.url}/v1/models",
+        response = _request(
+            http,
+            "GET",
+            _address(endpoint, "/v1/models"),
             headers={"Authorization": f"Bearer {endpoint.api_key}"},
         )
         response.raise_for_status()
@@ -319,7 +399,7 @@ def stream(
     stream would put the model's notes in the middle of it.
     """
     endpoint = get(name, workspace=workspace)
-    url = f"{endpoint.url}/v1/chat/completions"
+    url = _address(endpoint, "/v1/chat/completions")
     headers = {
         "Authorization": f"Bearer {endpoint.api_key}",
         "Content-Type": "application/json",
@@ -327,7 +407,7 @@ def stream(
 
     if _once is not None:
         with httpx.Client(timeout=300, verify=_verify()) as http:
-            response = http.post(url, headers=headers, json=_once)
+            response = _request(http, "POST", url, headers=headers, json=_once)
             response.raise_for_status()
             yield _reply(response.json())
         return
@@ -352,7 +432,7 @@ def stream(
     answered = False
 
     with httpx.Client(timeout=300, verify=_verify()) as http:
-        with http.stream("POST", url, headers=headers, json=body) as response:
+        with _stream(http, "POST", url, headers=headers, json=body) as response:
             response.raise_for_status()
             for line in response.iter_lines():
                 if not line.startswith("data: "):

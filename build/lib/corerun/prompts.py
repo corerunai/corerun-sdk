@@ -531,21 +531,3 @@ def delete(
     client = _get_client()
     client.delete(f"/prompts/{prompt_id}", workspace=workspace)
 
-
-def extract_variables(text: str) -> List[str]:
-    """Extract variable names from a template string.
-
-    Variables are in the format {{variable_name}}.
-
-    Args:
-        text: Template string
-
-    Returns:
-        List of unique variable names
-
-    Example:
-        vars = extract_variables("Hello {{name}}, you have {{count}} messages")
-        # Returns: ["name", "count"]
-    """
-    matches = re.findall(r"\{\{(\w+)\}\}", text)
-    return list(dict.fromkeys(matches))  # Preserve order, remove duplicates

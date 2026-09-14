@@ -10,8 +10,8 @@ Usage:
     corerun jobs submit --name train --image pytorch/pytorch:latest --gpu 1
     corerun jobs logs <job-id>
     corerun models list
-    corerun models upload my-model model.pt --framework pytorch
-    corerun models download my-model model.pt --alias champion
+    corerun models push my-model ./checkpoint -f pytorch
+    corerun models pull my-model --alias champion
     corerun models stage my-model 1 production
     corerun models alias my-model champion 1
     corerun models predict my-model input.json --alias champion
@@ -41,7 +41,9 @@ Usage:
 import typer
 from rich.console import Console
 
+from corerun.cli.accelerators import app as accelerators_app
 from corerun.cli.auth import app as auth_app
+from corerun.cli.catalogue import app as catalogue_app
 from corerun.cli.clusters import app as clusters_app
 from corerun.cli.compute import app as compute_app
 from corerun.cli.datasets import app as datasets_app
@@ -81,6 +83,7 @@ def main(
     output.set_json(json_output)
 
 # Add subcommands
+app.add_typer(accelerators_app, name="accelerators", help="Accelerator generations")
 app.add_typer(auth_app, name="auth", help="Authentication commands")
 app.add_typer(datasets_app, name="datasets", help="Dataset management")
 app.add_typer(jobs_app, name="jobs", help="Job management")
@@ -93,6 +96,8 @@ app.add_typer(finetune_app, name="finetune", help="Fine-tuning jobs")
 app.add_typer(evaluate_app, name="evaluate", help="LLM evaluations")
 app.add_typer(inference_app, name="inference", help="Inference servers")
 app.add_typer(endpoints_app, name="endpoints", help="Model endpoints")
+app.add_typer(catalogue_app, name="catalogue", help="Models available from the catalogue")
+app.add_typer(catalogue_app, name="catalog", help="Alias for catalogue")
 app.add_typer(clusters_app, name="clusters", help="Cluster inspection")
 app.add_typer(compute_app, name="compute", help="Compute targets")
 app.add_typer(quota_app, name="quota", help="Workspace quota")
@@ -143,6 +148,15 @@ def whoami():
     """
     from corerun.cli.auth import whoami as auth_whoami
     auth_whoami()
+
+
+@app.command()
+def logout():
+    """
+    Sign out (alias for 'corerun auth logout')
+    """
+    from corerun.cli.auth import logout as auth_logout
+    auth_logout()
 
 
 @app.command()

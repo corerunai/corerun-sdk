@@ -24,15 +24,29 @@ def _require_credentials():
     return config
 
 
-def fetch(api_url: str, api_key: str):
-    """The workspaces this credential can act in."""
+def fetch(api_url: str, api_key: str, verify: bool = True):
+    """The workspaces this credential can act in.
+
+    Raises the same UnreachableError the rest of the SDK raises, so a command
+    that cannot resolve the platform says which address it tried rather than
+    passing the resolver's own wording through -- "[Errno 8] nodename nor
+    servname provided, or not known" names neither the host nor the setting
+    that chose it, and this is the command people run first.
+    """
     import httpx
 
-    response = httpx.get(
-        api_url.rstrip("/") + "/workspaces",
-        headers={"Authorization": f"Bearer {api_key}"},
-        timeout=30.0,
-    )
+    from corerun.exceptions import unreachable
+
+    url = api_url.rstrip("/") + "/workspaces"
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30.0,
+            verify=verify,
+        )
+    except httpx.ConnectError as e:
+        raise unreachable(url, e) from e
     response.raise_for_status()
     return response.json().get("workspaces", [])
 
@@ -68,14 +82,14 @@ def resolve(workspaces, wanted: str):
     return None
 
 
-def choose(api_url: str, api_key: str, default: str = None):
+def choose(api_url: str, api_key: str, default: str = None, verify: bool = True):
     """List the caller's workspaces and ask which one to use.
 
     A single workspace is chosen without asking -- there is no decision to make
     -- and named, so it is still clear where the work will go.
     """
     try:
-        workspaces = fetch(api_url, api_key)
+        workspaces = fetch(api_url, api_key, verify=verify)
     except Exception as e:
         console.print(f"[yellow]Could not list workspaces:[/yellow] {e}")
         console.print("  Choose one later with: corerun ws set")
@@ -143,7 +157,7 @@ def list_workspaces():
     """
     config = _require_credentials()
     try:
-        workspaces = fetch(config.api_url, config.auth_token)
+        workspaces = fetch(config.api_url, config.auth_token, config.verify_ssl)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)
@@ -172,7 +186,7 @@ def set_workspace(
 
     if name:
         try:
-            workspaces = fetch(config.api_url, config.auth_token)
+            workspaces = fetch(config.api_url, config.auth_token, config.verify_ssl)
         except Exception as e:
             console.print(f"[red]Error:[/red] {e}")
             raise typer.Exit(1)
@@ -185,7 +199,12 @@ def set_workspace(
         chosen_id = chosen["id"]
         console.print(f"  Using [bold]{label(chosen)}[/bold]")
     else:
-        chosen_id = choose(config.api_url, config.auth_token, default=config.workspace)
+        chosen_id = choose(
+            config.api_url,
+            config.auth_token,
+            default=config.workspace,
+            verify=config.verify_ssl,
+        )
         if not chosen_id:
             raise typer.Exit(1)
 
@@ -211,7 +230,7 @@ def show_workspace():
         raise typer.Exit(1)
 
     try:
-        workspaces = fetch(config.api_url, config.auth_token)
+        workspaces = fetch(config.api_url, config.auth_token, config.verify_ssl)
         current = next((w for w in workspaces if w["id"] == config.workspace), None)
     except Exception:
         current = None

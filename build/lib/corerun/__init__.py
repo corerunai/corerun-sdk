@@ -31,18 +31,6 @@ Usage:
     # Wait for completion
     job.wait()
 
-Inside training scripts:
-    import corerun.tracking as track
-
-    # Log metrics
-    track.log_metric("loss", 0.5, step=epoch)
-
-    # Save checkpoints
-    track.save_checkpoint(model.state_dict(), "epoch_10.pt")
-
-    # Get output directories
-    output_dir = track.get_output_dir()
-
 Model Registry:
     import corerun
 
@@ -62,30 +50,6 @@ Model Registry:
     # Moving files in and out is done from the CLI, which needs git-lfs:
     #   corerun models push my-model ./checkpoint
     #   corerun models pull my-model
-
-Tracing (MLflow-compatible):
-    import corerun
-    from corerun import tracing
-
-    # Initialize with tracing enabled
-    corerun.init(auth_token="...", workspace="my-workspace")
-    tracing.configure(enabled=True)
-
-    # Decorator-based tracing
-    @tracing.trace(span_type="LLM")
-    def my_llm_call(messages):
-        return response
-
-    # Context manager tracing
-    with tracing.start_span("embedding_step", span_type="EMBEDDING") as span:
-        span.set_inputs({"text": "hello"})
-        result = embed(text)
-        span.set_outputs({"embedding": result})
-
-    # Auto-instrumentation
-    tracing.instrument("openai")  # Auto-trace OpenAI calls
-    tracing.instrument("anthropic")  # Auto-trace Anthropic calls
-    tracing.instrument("langchain")  # Auto-trace LangChain
 
 Prompt Registry:
     import corerun
@@ -108,30 +72,6 @@ Prompt Registry:
             {"role": "user", "content": "{{question}}"},
         ],
     )
-
-MLflow Servers:
-    import corerun
-
-    corerun.init()
-
-    # Create an MLflow server for your workspace
-    server = corerun.mlflow.create(cluster_name="my-cluster")
-    print(f"MLflow UI: {server.url}")
-
-    # Get or create (returns existing if running)
-    server = corerun.mlflow.get_or_create(cluster_name="my-cluster")
-
-    # List servers
-    servers = corerun.mlflow.list()
-
-    # Get tracking URI for jobs
-    uri = corerun.mlflow.get_tracking_uri()
-
-    # Delete server
-    corerun.mlflow.delete(server.id)
-
-    Note: When an MLflow server exists, all jobs automatically receive
-    MLFLOW_TRACKING_URI for seamless experiment tracking.
 
 Notebooks:
     import corerun
@@ -185,15 +125,6 @@ Inference Servers:
         messages=[{"role": "user", "content": "Hello!"}]
     )
 
-    # Deploy from MLflow registry
-    server = corerun.inference.deploy(
-        name="finetuned-model",
-        model_id="my-model@champion",
-        model_source="mlflow",
-        compute_name="dgx-cluster",
-        gpu=1,
-    )
-
     # Scale and manage
     corerun.inference.scale(server.id, min_replicas=2, max_replicas=4)
     corerun.inference.stop(server.id)
@@ -215,10 +146,7 @@ from corerun import (
     prompts,
     quota,
     registry,
-    tracing,
-    tracking,
 )
-from corerun import mlflow_servers as mlflow
 from corerun.client import CoreRunClient
 from corerun.config import get_client, get_config, init
 
@@ -230,11 +158,8 @@ __all__ = [
     "get_config",
     "datasets",
     "jobs",
-    "tracking",
     "registry",
-    "tracing",
     "prompts",
-    "mlflow",
     "notebooks",
     "endpoints",
     "inference",

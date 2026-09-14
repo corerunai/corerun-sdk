@@ -231,35 +231,6 @@ def create_model(
     return _model_from_response(response)
 
 
-def update_model(
-    name: str,
-    description: Optional[str] = None,
-    tags: Optional[Dict[str, str]] = None,
-    workspace: Optional[str] = None,
-) -> RegisteredModel:
-    """
-    Update a registered model.
-
-    Args:
-        name: Model name
-        description: New description
-        tags: New tags (replaces existing)
-        workspace: Workspace ID (uses default if not specified)
-
-    Returns:
-        Updated RegisteredModel object
-    """
-    client = get_client()
-    data = {}
-    if description is not None:
-        data["description"] = description
-    if tags is not None:
-        data["tags"] = tags
-
-    response = client.put(f"/registry/models/{name}", json=data, workspace=workspace)
-    return _model_from_response(response)
-
-
 def delete_model(name: str, workspace: Optional[str] = None) -> None:
     """
     Delete a registered model and all its versions.
@@ -421,23 +392,6 @@ def set_version_stage(
     return _version_from_response(response)
 
 
-def delete_version(
-    model_name: str,
-    version: int,
-    workspace: Optional[str] = None,
-) -> None:
-    """
-    Delete a model version.
-
-    Args:
-        model_name: Model name
-        version: Version number
-        workspace: Workspace ID (uses default if not specified)
-    """
-    client = get_client()
-    client.delete(f"/registry/models/{model_name}/versions/{version}", workspace=workspace)
-
-
 # ============================================================================
 # Aliases API
 # ============================================================================
@@ -515,124 +469,9 @@ def delete_alias(
     client.delete(f"/registry/models/{model_name}/aliases/{alias}", workspace=workspace)
 
 
-def get_by_alias(
-    model_name: str,
-    alias: str,
-    workspace: Optional[str] = None,
-) -> ModelVersion:
-    """
-    Get a model version by alias.
-
-    Args:
-        model_name: Model name
-        alias: Alias name
-        workspace: Workspace ID (uses default if not specified)
-
-    Returns:
-        ModelVersion object that the alias points to
-
-    Example:
-        champion = corerun.registry.get_by_alias("my-llm", "champion")
-        print(f"Champion is version {champion.version}")
-    """
-    client = get_client()
-    response = client.get(f"/registry/models/{model_name}/alias/{alias}", workspace=workspace)
-    return _version_from_response(response.get("version", {}))
-
-
 # ============================================================================
-# Publish from Job API
+# Import API
 # ============================================================================
-
-
-def publish_from_job(
-    model_name: str,
-    job_id: str,
-    description: Optional[str] = None,
-    framework: str = "pytorch",
-    workspace: Optional[str] = None,
-) -> ModelVersion:
-    """
-    Publish a model version from a fine-tuning job's outputs.
-
-    This creates a new version of the model using the artifacts
-    from the specified job's output directory.
-
-    Args:
-        model_name: Model name (will be created if doesn't exist)
-        job_id: Fine-tuning job ID
-        description: Version description
-        framework: Model framework (default: "pytorch")
-        workspace: Workspace ID (uses default if not specified)
-
-    Returns:
-        Created ModelVersion object
-
-    Example:
-        # After fine-tuning completes
-        version = corerun.registry.publish_from_job(
-            model_name="my-finetuned-llm",
-            job_id="abc123",
-            description="Trained on support tickets v2",
-        )
-        print(f"Published as version {version.version}")
-
-        # Then deploy it
-        server = corerun.inference.deploy(
-            name="support-llm",
-            model_id="meta-llama/Llama-2-7b-chat-hf",
-            compute_name="dgx-cluster",
-            gpu=1,
-            lora_modules=[
-                LoRAModule(
-                    name="support-adapter",
-                    source="registry",
-                    model_name="my-finetuned-llm",
-                    model_version=version.version,
-                ),
-            ],
-        )
-    """
-    client = get_client()
-    data = {
-        "job_id": job_id,
-        "framework": framework,
-    }
-    if description:
-        data["description"] = description
-
-    response = client.post(
-        f"/registry/models/{model_name}/publish-from-job",
-        json=data,
-        workspace=workspace,
-    )
-    return _version_from_response(response)
-
-
-# ============================================================================
-# MLflow Sync API
-# ============================================================================
-
-
-def sync_from_mlflow(workspace: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Sync models from the workspace's MLflow server.
-
-    This imports all registered models from MLflow into
-    the corerun model registry.
-
-    Args:
-        workspace: Workspace ID (uses default if not specified)
-
-    Returns:
-        Sync results with counts of synced models and versions
-
-    Example:
-        result = corerun.registry.sync_from_mlflow()
-        print(f"Synced {result['models_synced']} models")
-    """
-    client = get_client()
-    return client.post("/registry/sync-mlflow", workspace=workspace)
 
 
 def import_from_huggingface(

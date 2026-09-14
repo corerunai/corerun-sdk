@@ -60,17 +60,31 @@ pip install -e .
 
 ## Pointing it somewhere
 
-It talks to `https://corerun.ai/api/v1` unless told otherwise, and reads model
-endpoints from `https://api.corerun.ai`. A self-hosted deployment overrides both
-in `~/.corerun/config`:
+It talks to `https://corerun.ai/api/v1` unless told otherwise. Everything else
+about where a deployment lives, it is told: the platform reports the address
+each model endpoint is published at, so a self-hosted deployment needs to set
+only the API address in `~/.corerun/config`:
 
 ```
 api_url=https://corerun.example.com/api/v1
-inference_url=https://api.corerun.example.com
 ```
 
-`CORERUN_API_URL` and `CORERUN_INFERENCE_URL` override the file, which is what
-CI uses. `corerun login` writes the file for you.
+`CORERUN_API_URL` overrides the file, which is what CI uses. `corerun login`
+writes the file for you.
+
+Model endpoints are called at the address the platform reports for each one,
+which it knows better than the SDK can work out. Failing that, the address
+follows the API address: the deployment's own domain with an `api`-prefixed
+label — `https://corerun.ai/api/v1` publishes its endpoints at
+`https://api.corerun.ai`, and an environment named in the host keeps its name
+(`https://dev.corerun.ai/api/v1` → `https://api-dev.corerun.ai`, `api-dev…`
+rather than a subdomain of `dev`).
+
+`CORERUN_INFERENCE_URL` exists for what neither of those can cover: a deployment
+whose callers reach the gateway on a host of its own, or behind a private load
+balancer. Set, it wins over both and replaces the base an endpoint is called on,
+keeping the path and the endpoint's name. `corerun whoami` prints whichever one
+is in force.
 
 ## Quick Start
 
@@ -256,103 +270,54 @@ model = corerun.registry.create_model(
     tags={"framework": "pytorch", "task": "classification"},
 )
 
-# Upload a model file
-version = corerun.registry.upload_model(
+# Record a version. The files are already in workspace storage -- moving them
+# in and out is the CLI's job, because it needs git-lfs:
+#   corerun models push resnet50 ./checkpoint -f pytorch
+#   corerun models pull resnet50 --alias champion
+version = corerun.registry.create_version(
     "resnet50",
-    local_path="model.pt",
+    storage_path="models/resnet50/1",
     framework="pytorch",
     description="Trained on ImageNet",
 )
-print(f"Uploaded as v{version.version}")
+print(f"Recorded as v{version.version}")
 
-# Or log a model object directly
-import torch
-model = torch.load("model.pt")
-version = corerun.registry.log_model(
-    "resnet50",
-    model,
-    framework="pytorch",
-)
+# Promote it
+corerun.registry.set_version_stage("resnet50", version.version, "production")
 
-# Transition to production
-corerun.registry.transition_stage("resnet50", version.version, "production")
-
-# Set aliases
+# Point an alias at it
 corerun.registry.set_alias("resnet50", "champion", version.version)
 corerun.registry.set_alias("resnet50", "latest", version.version)
-
-# Download a model by version or alias
-corerun.registry.download_model("resnet50", "model.pt", version=1)
-corerun.registry.download_model("resnet50", "model.pt", alias="champion")
-
-# Load model directly
-model = corerun.registry.load_model("resnet50", alias="champion", framework="pytorch")
-model.eval()
 
 # List versions
 versions = corerun.registry.list_versions("resnet50")
 for v in versions:
-    print(f"v{v.version}: {v.stage} ({v.size_mb:.1f}MB)")
+    print(f"v{v.version}: {v.stage}")
 
 # List aliases
 aliases = corerun.registry.list_aliases("resnet50")
 for alias in aliases:
     print(f"@{alias.alias} -> v{alias.version}")
 
-# Delete a model version
-corerun.registry.delete_version("resnet50", 1)
-
-# Delete entire model
+# Delete an alias, and a whole model
+corerun.registry.delete_alias("resnet50", "latest")
 corerun.registry.delete_model("old-model")
 ```
 
-### Model Inference
+A model whose weights are on HuggingFace can be imported without pulling them
+through this machine:
 
 ```python
-import corerun
-
-# Quick one-off prediction
-result = corerun.registry.predict(
-    "my-model",
-    input_data,
-    alias="champion",
+corerun.registry.import_from_huggingface(
+    "llama-3-8b",
+    huggingface_id="meta-llama/Meta-Llama-3-8B",
+    revision="main",
 )
-
-# For multiple predictions, use a predictor to avoid reloading
-predictor = corerun.registry.get_predictor("my-model", alias="champion")
-
-# Single prediction
-result = predictor.predict(input_data)
-
-# Batch prediction
-results = predictor.predict_batch([input1, input2, input3], batch_size=16)
-
-# Get probabilities (classifiers)
-probs = predictor.predict_proba(input_data)
-
-# With preprocessing and postprocessing
-import torchvision.transforms as T
-
-transform = T.Compose([
-    T.Resize(224),
-    T.ToTensor(),
-    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-])
-
-predictor = corerun.registry.get_predictor(
-    "resnet50",
-    alias="champion",
-    preprocess=lambda img: transform(img).unsqueeze(0),
-    postprocess=lambda out: out.argmax(dim=1).item(),
-    device="cuda",  # Optional: specify device
-)
-
-# Predict on an image
-label = predictor.predict(pil_image)
-
-# Batch predict
-labels = predictor.predict_batch(images, batch_size=32)
 ```
+
+Serving a registered model is a deployment, not a local prediction -- see
+`corerun inference deploy`.
+
 
 ## CLI Usage
 
@@ -467,12 +432,12 @@ corerun models create my-model --description "My ML model"
 corerun models create my-model -t framework=pytorch -t task=classification
 
 # Upload a model file
-corerun models upload my-model model.pt --framework pytorch
-corerun models upload my-model model.pt -d "Trained for 100 epochs"
+corerun models push my-model ./checkpoint -f pytorch
+corerun models push my-model ./checkpoint -d "Trained for 100 epochs"
 
 # Download a model
-corerun models download my-model model.pt --version 1
-corerun models download my-model model.pt --alias champion
+corerun models pull my-model --version 1
+corerun models pull my-model --alias champion
 
 # List versions
 corerun models versions my-model
@@ -506,9 +471,14 @@ corerun models predict my-model data.csv --alias production --json
 |----------|-------------|
 | `CORERUN_AUTH_TOKEN` | Auth token, for when a browser login is not possible |
 | `CORERUN_WORKSPACE` | Default workspace ID |
-| `CORERUN_API_URL` | API base URL (default: https://dev.corerun.ai/api/v1) |
+| `CORERUN_API_URL` | API base URL (default: https://corerun.ai/api/v1) |
+| `CORERUN_INFERENCE_URL` | Where model endpoints are published, when it is not what the platform reports |
 | `CORERUN_TIMEOUT` | Request timeout in seconds (default: 30) |
+| `CORERUN_VERIFY_SSL` | Check TLS certificates (default: true; set false for a self-signed deployment) |
 | `CORERUN_AUTH_TOKEN_FILE` | Where to read the platform credential (default: `/etc/corerun/api-key`) |
+
+Each one overrides the same setting in `~/.corerun/config`, which in turn
+overrides the default.
 
 ### Inside a corerun notebook
 

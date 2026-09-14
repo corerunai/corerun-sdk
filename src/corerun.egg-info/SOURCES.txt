@@ -17,15 +17,12 @@ src/corerun/finetune.py
 src/corerun/inference.py
 src/corerun/jobs.py
 src/corerun/lfs.py
-src/corerun/mlflow_servers.py
 src/corerun/models.py
 src/corerun/notebooks.py
 src/corerun/prompts.py
 src/corerun/pull.py
 src/corerun/quota.py
 src/corerun/registry.py
-src/corerun/tracing.py
-src/corerun/tracking.py
 src/corerun.egg-info/PKG-INFO
 src/corerun.egg-info/SOURCES.txt
 src/corerun.egg-info/dependency_links.txt
@@ -33,7 +30,9 @@ src/corerun.egg-info/entry_points.txt
 src/corerun.egg-info/requires.txt
 src/corerun.egg-info/top_level.txt
 src/corerun/cli/__init__.py
+src/corerun/cli/accelerators.py
 src/corerun/cli/auth.py
+src/corerun/cli/catalogue.py
 src/corerun/cli/clusters.py
 src/corerun/cli/compute.py
 src/corerun/cli/datasets.py
@@ -61,4 +60,6 @@ src/corerun/skills/corerun-models/SKILL.md
 src/corerun/skills/corerun-quota/SKILL.md
 tests/test_credentials.py
 tests/test_dataset_splits.py
+tests/test_evaluate_exit_codes.py
+tests/test_inference_recipe.py
 tests/test_token_refresh.py

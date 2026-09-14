@@ -342,9 +342,19 @@ def get_run(
     console.print(f"[bold]Evaluation Run: {run.name}[/bold]")
     console.print(f"  ID: {run.id}")
     console.print(f"  Status: {status_text}  Progress: {run.progress}%")
-    console.print(f"  Dataset: {run.dataset_name or run.dataset_id}")
-    console.print(f"  Model: {run.model_config.model} ({run.model_config.type})")
-    console.print(f"  Scorers: {', '.join(run.scorers)}")
+    # A run measures a dataset or a public benchmark, and which one it is is the
+    # first thing to know about it -- an empty "Dataset:" line says nothing.
+    if run.benchmark:
+        limit = f", first {run.benchmark_limit}" if run.benchmark_limit else ""
+        console.print(f"  Benchmark: {run.benchmark}{limit}")
+    else:
+        console.print(f"  Dataset: {run.dataset_name or run.dataset_id}")
+    # llm_config, not model_config: the wire name is "model_config" but
+    # `model_config` is pydantic's own attribute, so reading it back by the
+    # alias hands over the model's settings instead of the run's.
+    console.print(f"  Model: {run.llm_config.model} ({run.llm_config.type})")
+    if run.scorers:
+        console.print(f"  Scorers: {', '.join(run.scorers)}")
     if run.error:
         console.print(f"  Error: [red]{run.error}[/red]")
     if run.created_at:
@@ -366,12 +376,20 @@ def get_run(
 @runs_app.command("create")
 def create_run(
     name: str = typer.Option(..., "--name", "-n", help="Run name"),
-    dataset_id: str = typer.Option(..., "--dataset", "-d", help="Evaluation dataset ID"),
+    dataset_id: Optional[str] = typer.Option(None, "--dataset", "-d", help="Evaluation dataset ID"),
+    benchmark: Optional[str] = typer.Option(
+        None, "--benchmark", help="Public benchmark name (e.g. gsm8k) instead of a dataset"
+    ),
+    benchmark_limit: int = typer.Option(
+        0, "--benchmark-limit", help="Examples to run from the benchmark (0 = all)"
+    ),
     model: str = typer.Option(..., "--model", "-m", help="Model name"),
     endpoint_id: Optional[str] = typer.Option(None, "--endpoint", help="corerun inference server ID"),
     base_url: Optional[str] = typer.Option(None, "--base-url", help="Model API base URL"),
     api_key_val: Optional[str] = typer.Option(None, "--api-key", help="Model API key"),
-    scorers: str = typer.Option(..., "--scorers", "-s", help="Comma-separated scorer IDs"),
+    scorers: Optional[str] = typer.Option(
+        None, "--scorers", "-s", help="Comma-separated scorer IDs (dataset runs)"
+    ),
     description: Optional[str] = typer.Option(None, "--description", help="Description"),
     compute: Optional[str] = typer.Option(None, "--compute", "-c", help="Auto-start on this compute target"),
     wait_for_completion: bool = typer.Option(False, "--wait", help="Wait for completion (requires --compute)"),
@@ -379,6 +397,9 @@ def create_run(
 ):
     """
     Create an evaluation run.
+
+    A run measures a dataset you made (with the scorers you name) or a public
+    benchmark, which brings its own examples and its own scorer.
 
     Example:
         # With corerun inference endpoint
@@ -390,6 +411,11 @@ def create_run(
         corerun evaluate runs create --name gpt-eval --dataset abc123 \\
             --model gpt-4o-mini --base-url https://api.openai.com/v1 \\
             --api-key sk-xxx --scorers correctness,fluency
+
+        # A public benchmark, against a model on one of our endpoints
+        corerun evaluate runs create --name gsm8k-check --benchmark gsm8k \\
+            --benchmark-limit 50 --model qwen3.8-27b --endpoint <endpoint-name> \\
+            --compute dgx-cluster --wait
     """
     _init_client()
 
@@ -413,15 +439,25 @@ def create_run(
         console.print("[red]Error:[/red] Provide either --endpoint or --base-url")
         raise typer.Exit(1)
 
-    scorer_list = [s.strip() for s in scorers.split(",")]
+    # Scorers belong to a dataset run; a benchmark brings its own, and asking
+    # for both is how someone ends up with a run whose scorers were ignored.
+    if benchmark and scorers:
+        console.print("[yellow]Note:[/yellow] a benchmark scores itself; --scorers is ignored")
+    scorer_list = [s.strip() for s in (scorers or "").split(",") if s.strip()]
+
+    if not dataset_id and not benchmark:
+        console.print("[red]Error:[/red] Provide --dataset or --benchmark")
+        raise typer.Exit(1)
 
     try:
         run = ev.create_run(
             name=name,
-            dataset_id=dataset_id,
+            dataset_id=dataset_id or "",
             model_config=model_config,
             scorers=scorer_list,
             description=description,
+            benchmark=benchmark or "",
+            benchmark_limit=benchmark_limit,
             workspace=workspace,
         )
     except Exception as e:
@@ -513,41 +549,95 @@ def start_run(
 def wait_for_run(
     run_id: str = typer.Argument(..., help="Run ID"),
     timeout: Optional[int] = typer.Option(None, "--timeout", "-t", help="Timeout in seconds"),
+    fail_under: Optional[float] = typer.Option(
+        None, "--fail-under",
+        help="Exit 1 if any scorer is below this. For a pipeline that should block a bad model.",
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Print the scores as JSON, so a pipeline need not scrape a table."
+    ),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
 ):
     """
     Wait for an evaluation run to complete.
 
+    Exits 0 if it passed, 1 if the model scored below --fail-under, and 2 if the
+    run itself failed. A pipeline treats those differently: a model that got
+    worse is a result, a run that crashed is an outage, and a build that cannot
+    tell them apart gets ignored.
+
     Example:
         corerun evaluate runs wait abc123
-        corerun evaluate runs wait abc123 --timeout 1800
+        corerun evaluate runs wait abc123 --fail-under 0.6 --json
     """
     _init_client()
 
     import corerun.evaluations as ev
 
-    console.print(f"Waiting for evaluation run {run_id}...")
+    if not as_json:
+        console.print(f"Waiting for evaluation run {run_id}...")
 
     try:
         def on_update(run):
-            console.print(f"  Status: [{_run_status_style(run.status)}]{run.status}[/]  Progress: {run.progress}%")
+            if not as_json:
+                console.print(
+                    f"  Status: [{_run_status_style(run.status)}]{run.status}[/]  Progress: {run.progress}%"
+                )
 
         run = ev.wait_run(run_id, timeout=timeout, callback=on_update, workspace=workspace)
-        console.print(f"\n[green]✓[/green] Completed")
-        console.print(f"  Status: [{_run_status_style(run.status)}]{run.status}[/]")
-        if run.results:
-            agg = run.results.get("aggregate_scores", {})
-            if agg:
-                console.print("\n[bold]Aggregate Scores:[/bold]")
-                for scorer, score in agg.items():
-                    console.print(f"  {scorer}: {score:.4f}")
-        if run.error:
-            console.print(f"  Error: {run.error}")
     except KeyboardInterrupt:
         console.print("\nInterrupted (run continues)")
+        raise typer.Exit(2)
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(2)
+
+    scores = (run.results or {}).get("aggregate_scores", {}) or {}
+
+    # A run that finished having failed is not a completed run. Reporting it as
+    # one is why an evaluation step in CI passed no matter what happened.
+    if run.status != "completed":
+        if as_json:
+            _print_json({"run_id": run_id, "status": run.status, "error": run.error, "scores": scores})
+        else:
+            console.print(f"\n[red]✗[/red] Run {run.status}")
+            if run.error:
+                console.print(f"  Error: {run.error}")
+        raise typer.Exit(2)
+
+    below = {name: value for name, value in scores.items() if fail_under is not None and value < fail_under}
+
+    if as_json:
+        _print_json({
+            "run_id": run_id, "status": run.status, "scores": scores,
+            "fail_under": fail_under, "below": below, "passed": not below,
+        })
+    else:
+        console.print(f"\n[green]✓[/green] Completed")
+        if scores:
+            console.print("\n[bold]Aggregate Scores:[/bold]")
+            for scorer, score in scores.items():
+                marker = " [red]below threshold[/red]" if scorer in below else ""
+                console.print(f"  {scorer}: {score:.4f}{marker}")
+        for scorer, score in below.items():
+            console.print(f"[red]✗[/red] {scorer} scored {score:.4f}, below --fail-under {fail_under}")
+
+    if below:
         raise typer.Exit(1)
+
+
+
+def _print_json(payload: dict) -> None:
+    """Write machine-readable output straight to stdout.
+
+    Not through the console: it applies markup and wraps at the terminal width,
+    both of which corrupt JSON the moment somebody pipes it into jq.
+    """
+    import json as _json
+    import sys as _sys
+
+    _sys.stdout.write(_json.dumps(payload, indent=2) + "\n")
+    _sys.stdout.flush()
 
 
 @runs_app.command("delete")

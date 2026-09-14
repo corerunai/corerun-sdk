@@ -146,6 +146,17 @@ def get_server(
 
     if s.openai_base_url:
         console.print(f"  OpenAI base URL: {s.openai_base_url}")
+
+    # What the engine was actually launched with. Without this the flags a
+    # model needs are invisible from the outside, and a model that cannot call
+    # tools looks exactly like one that can.
+    if s.extra_args:
+        console.print(f"  Engine args: {' '.join(s.extra_args)}")
+        if s.recipe_source:
+            provenance = f"    [dim]from {s.recipe_source}"
+            if s.recipe_note:
+                provenance += f" — {s.recipe_note}"
+            console.print(provenance + "[/dim]")
     if s.error:
         console.print(f"  [red]Error:[/red] {s.error}")
 
@@ -378,6 +389,66 @@ def restart_server(
     console.print("[green]Restart requested[/green]")
 
 
+@app.command("update")
+def update_server(
+    reference: str = typer.Argument(..., metavar="SERVER", help="Server name or ID"),
+    image: Optional[str] = typer.Option(None, "--image", help="Container image to run instead"),
+    extra_arg: Optional[List[str]] = typer.Option(
+        None, "--extra-arg", help="Engine flag, passed through as given (repeatable)"
+    ),
+    gpu: Optional[float] = typer.Option(None, "--gpu", help="GPUs to allocate"),
+    max_model_len: Optional[int] = typer.Option(
+        None, "--max-model-len", help="Maximum sequence length"
+    ),
+    enforce_eager: Optional[bool] = typer.Option(
+        None,
+        "--enforce-eager/--no-enforce-eager",
+        help="Disable CUDA graphs, for GPUs that need it",
+    ),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
+):
+    """
+    Change how a server runs, keeping its ID, endpoint and key.
+
+    The engine reads its flags at startup, so the workload is replaced -- but
+    the server is not. Callers keep the endpoint they were given.
+
+    Example:
+        # Let a served model call tools, which vLLM refuses without these
+        corerun inference update qwen38-nvfp4 \\
+            --extra-arg --enable-auto-tool-choice --extra-arg hermes
+
+        # Wait for the new shape to come up
+        corerun inference wait qwen38-nvfp4
+    """
+    _init_client()
+
+    import corerun.inference as inference
+
+    changed = {
+        "image": image,
+        "extra_args": extra_arg,
+        "gpu": gpu,
+        "max_model_len": max_model_len,
+        "enforce_eager": enforce_eager,
+    }
+    if all(value is None for value in changed.values()):
+        console.print("[red]Error:[/red] nothing to change: name at least one setting")
+        raise typer.Exit(1)
+
+    resolved = _resolve(reference, workspace)
+
+    try:
+        server = inference.update(resolved, workspace=workspace, **changed)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print(f"[green]Updating {server.name}[/green]")
+    console.print(f"  Status: [{_status_style(server.status)}]{server.status}[/]")
+    console.print(f"\n  Use 'corerun inference wait {server.name}' to follow it")
+
+
 @app.command("delete")
 def delete_server(
     server_id: str = typer.Argument(..., metavar="SERVER", help="Server name or ID"),
@@ -479,3 +550,115 @@ def list_types(
             table.add_row(str(t), "")
 
     console.print(table)
+
+
+@app.command("plan")
+def plan_server(
+    server_id: str = typer.Argument(..., metavar="SERVER", help="Server name or ID"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """
+    What this server's next deployment would run with.
+
+    The engine arguments a deployment would use, resolved the way the
+    deployment resolves them and with nothing deployed. The one way to see the
+    arguments of a server that is already serving, and the way to see what a
+    change to the accelerator table would do before it happens.
+
+    Example:
+        corerun inference plan qwen38-nvfp4
+    """
+    _init_client()
+
+    import corerun.inference as inference
+
+    resolved = _resolve(server_id, workspace)
+
+    try:
+        p = inference.plan(resolved, workspace=workspace)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    if json_output:
+        output.set_json(True)
+    if output.json_mode():
+        output.emit(p)
+        return
+
+    console.print(f"\n[bold cyan]Next deployment of {server_id}[/]")
+    console.print(f"  Image:       {p.get('image', '-')}")
+    if p.get("accelerator"):
+        console.print(f"  Accelerator: {p['accelerator']} [dim]({p.get('accelerator_from', '')})[/dim]")
+    args = p.get("extra_args") or []
+    console.print(f"  Engine args: {' '.join(args) if args else '[dim](none)[/dim]'}")
+    for line in (p.get("accelerator_note") or "").split("; "):
+        if line.strip():
+            console.print(f"  [yellow]·[/yellow] {line}")
+    if p.get("recipe_source"):
+        console.print(f"  [dim]Recipe from {p['recipe_source']}[/dim]")
+    if p.get("recipe_note"):
+        console.print(f"  [yellow]·[/yellow] {p['recipe_note']}")
+
+
+@app.command("recipe")
+def model_recipe(
+    model: str = typer.Argument(..., metavar="MODEL", help="Model id, e.g. Qwen/Qwen3.8-27B"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """
+    Show how a model's publisher says it should be served.
+
+    Deployments take these engine arguments as defaults, so this is what a
+    deployment of this model will run with -- minus any flag you set yourself.
+    Worth checking before a deploy: a model launched without its tool-call
+    parser cannot call tools, and nothing says so until a request needs them.
+
+    Example:
+        corerun inference recipe Qwen/Qwen3.8-27B
+    """
+    _init_client()
+
+    import corerun.inference as inference
+
+    try:
+        r = inference.recipe(model, workspace=workspace)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    if json_output:
+        output.set_json(True)
+    if output.json_mode():
+        output.emit(r.model_dump(mode="json"))
+        return
+
+    if not r.found:
+        console.print(f"[yellow]No serving recipe published for {model}.[/yellow]")
+        if r.reason:
+            console.print(f"[dim]{r.reason}[/dim]")
+        console.print("A deployment proceeds without one, exactly as before.")
+        return
+
+    console.print(f"\n[bold cyan]{r.title or r.hf_id}[/]  [dim]{r.hf_id}[/]")
+    if r.provider:
+        console.print(f"  Provider:  {r.provider}")
+    if r.context_length:
+        console.print(f"  Context:   {r.context_length} tokens")
+    if r.min_vllm_version:
+        console.print(f"  Needs vLLM: {r.min_vllm_version} or newer")
+    if r.image:
+        console.print(f"  Image:     {r.image}")
+    if r.hardware:
+        console.print(f"  Written for: [magenta]{r.hardware}[/magenta]")
+    if r.note:
+        console.print(f"  [yellow]Note:[/yellow] {r.note}")
+
+    if r.args:
+        console.print("\n  Engine arguments:")
+        for arg in r.args:
+            console.print(f"    {arg}")
+    if r.source:
+        console.print(f"\n  [dim]Read from {r.source}[/dim]")

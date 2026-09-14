@@ -8,9 +8,9 @@ description: Work with the corerun model registry — list and create registered
 ```bash
 corerun models list
 corerun models versions <name>
-corerun models download <name> <file> --alias champion
+corerun models pull <name> --alias champion
 corerun models create <name> --framework <framework>
-corerun models upload <name> <file> --framework <framework>
+corerun models push <name> <dir> -f <framework>
 ```
 
 ## Staging and aliases

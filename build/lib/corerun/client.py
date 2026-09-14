@@ -19,6 +19,7 @@ from corerun.exceptions import (
     RateLimitError,
     ServerError,
     ValidationError,
+    unreachable,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -118,21 +119,35 @@ class CoreRunClient:
         if workspace:
             headers["X-Workspace-ID"] = workspace
 
-        response = self.client.request(
-            method=method,
-            url=path,
-            params=params,
-            json=json,
-            headers=headers,
-            **kwargs,
-        )
+        response = self._send(method, path, params, json, headers, **kwargs)
 
         # A notebook's platform credential is replaced every few hours. A client
         # built before the swap holds the previous key, and the only way it
         # finds out is a 401 — so read the file again and retry once before
         # reporting an auth failure the user cannot act on.
         if response.status_code == 401 and self._refresh_credential():
-            response = self.client.request(
+            response = self._send(method, path, params, json, headers, **kwargs)
+
+        return self._handle_response(response)
+
+    def _send(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict[str, Any]],
+        json: Optional[Dict[str, Any]],
+        headers: Dict[str, str],
+        **kwargs,
+    ) -> httpx.Response:
+        """Make the request, or describe the address that could not be reached.
+
+        A failure here is not the platform answering "no": it is nothing having
+        answered at all, which the transport reports in whatever words the
+        operating system used. Those words name no host and suggest nothing, so
+        they are replaced with a sentence about the address.
+        """
+        try:
+            return self.client.request(
                 method=method,
                 url=path,
                 params=params,
@@ -140,8 +155,8 @@ class CoreRunClient:
                 headers=headers,
                 **kwargs,
             )
-
-        return self._handle_response(response)
+        except httpx.ConnectError as e:
+            raise unreachable(f"{self.config.api_url.rstrip('/')}/{path.lstrip('/')}", e) from e
 
     def _refresh_credential(self) -> bool:
         """
@@ -352,12 +367,17 @@ class CoreRunClient:
             timeout=self.config.timeout,
             verify=self.config.verify_ssl,
         ) as client:
-            response = client.post(
-                path,
-                files=files,
-                data=data or {},
-                headers=headers,
-            )
+            try:
+                response = client.post(
+                    path,
+                    files=files,
+                    data=data or {},
+                    headers=headers,
+                )
+            except httpx.ConnectError as e:
+                raise unreachable(
+                    f"{self.config.api_url.rstrip('/')}/{path.lstrip('/')}", e
+                ) from e
             return self._handle_response(response)
 
     def put(

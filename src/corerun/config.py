@@ -11,10 +11,12 @@ The platform credential is last so that anything the user chose themselves —
 `corerun login`, an explicit key — wins over the one the notebook was handed.
 """
 
+import ipaddress
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -24,12 +26,70 @@ from corerun.credentials import credential_path, read_platform_credential
 
 # Where a client looks unless it is told otherwise.
 #
-# The platform's own address and, separately, the host model endpoints are
-# published on. Both are overridden by ~/.corerun/config or the matching
-# environment variable, which is what a self-hosted deployment does -- these
-# are what corerun.ai serves, not an assumption that everybody uses it.
+# Overridden by ~/.corerun/config or CORERUN_API_URL, which is what a
+# self-hosted deployment does -- this is what corerun.ai serves, not an
+# assumption that everybody uses it.
 DEFAULT_API_URL = "https://corerun.ai/api/v1"
-DEFAULT_INFERENCE_URL = "https://api.corerun.ai"
+
+# Fixed at nothing: an address that suits one deployment is wrong for the next,
+# which is how a CLI pointed at a development platform came to send its calls to
+# a production host that no longer resolved. What is left is an override for the
+# case the platform's own answer cannot cover, and otherwise the address is
+# derived from the API address -- see inference_base_from below.
+DEFAULT_INFERENCE_URL = ""
+
+# What clients up to 0.1.0 wrote into the file on every login, because it was
+# their default rather than anybody's decision. It is still in the files of
+# everyone who signed in with one, where it reads as a choice and takes
+# precedence over both the address the platform reports and the one its API
+# address implies -- so a deployment that has since moved keeps being called at
+# the address its clients used to look for. Recognised, it is treated as absent
+# and the next save drops it.
+LEGACY_INFERENCE_URL = "https://api.corerun.ai"
+
+
+def _is_address(host: str) -> bool:
+    """Whether a host is a literal address rather than a name."""
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def inference_base_from(api_url: str) -> str:
+    """Where a deployment publishes its model endpoints, given its API address.
+
+    The first label of an API host names the environment -- ``dev`` in
+    ``dev.corerun.ai`` -- and a deployment serves its gateway from the same
+    domain with an ``api``-prefixed label: ``api.corerun.ai`` for the apex,
+    ``api-dev.corerun.ai`` for an environment that is named. That is the address
+    the deployment's own configuration reaches for, so it is what an override
+    should start from.
+
+    Empty when there is nothing to build from -- a bare name, a single label, a
+    literal address -- because a guess at one of those names a host that was
+    never published, which fails in a way the reader cannot tell from a
+    deployment that is simply down.
+    """
+    parts = urlsplit(api_url or "")
+    host = parts.hostname or ""
+    labels = host.split(".")
+
+    if len(labels) < 2 or _is_address(host):
+        return ""
+
+    scheme = parts.scheme or "https"
+
+    # Already the gateway's own name: one host serving both, so there is no
+    # second name to build -- and prefixing it again would invent one.
+    if labels[0].startswith("api"):
+        return f"{scheme}://{host}"
+
+    if len(labels) == 2:
+        return f"{scheme}://api.{host}"
+
+    return f"{scheme}://api-{labels[0]}.{'.'.join(labels[1:])}"
 
 
 @dataclass
@@ -45,10 +105,9 @@ class Config:
     workspace: Optional[str] = None
     api_url: str = DEFAULT_API_URL
 
-    # Where model endpoints are published. A separate host because the edge in
-    # front of a console and the edge in front of an API want opposite things,
-    # and because the SDK may need it before it has asked the platform for an
-    # endpoint -- the platform's own answer always wins when there is one.
+    # Where model endpoints are published, when something has to override what
+    # the platform reports. Empty means nothing was chosen, which is not the
+    # same as having nowhere to call: see inference_base.
     inference_url: str = DEFAULT_INFERENCE_URL
     timeout: int = 30
     verify_ssl: bool = True
@@ -57,6 +116,20 @@ class Config:
     # rewritten while the notebook runs, so a long-lived client re-reads it
     # rather than trusting the value it started with.
     auth_token_file: Optional[Path] = None
+
+    @property
+    def inference_base(self) -> str:
+        """Where to call model endpoints: what was chosen, or what api_url implies.
+
+        Kept apart from inference_url because the two are trusted differently.
+        A chosen address is somebody's decision and overrides what the platform
+        reports; a derived one is this SDK's guess about a deployment it can see
+        the API address of, and stands only where the platform reports nothing.
+
+        Derived rather than stored, and never written back: it follows api_url,
+        so saving it would freeze the answer to a question that moves.
+        """
+        return self.inference_url or inference_base_from(self.api_url)
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -101,7 +174,12 @@ class Config:
                     elif key == "api_url":
                         config.api_url = value
                     elif key == "inference_url":
-                        config.inference_url = value
+                        # A value an older client wrote for itself is not a
+                        # choice, and keeping it would pin this deployment to
+                        # the address that client looked for. Any other value
+                        # was put there by somebody, and stands.
+                        if value != LEGACY_INFERENCE_URL:
+                            config.inference_url = value
                     elif key == "timeout":
                         config.timeout = int(value)
                     elif key == "verify_ssl":
@@ -110,13 +188,22 @@ class Config:
         return config
 
     def save(self, path: Optional[Path] = None):
-        """Save configuration to file"""
+        """Save configuration to file.
+
+        Written to a neighbouring file and moved into place, because the other
+        half of this class reads the file whenever it wants a setting. Writing
+        in place empties it for as long as the write takes, and a command that
+        reads in that window finds no credentials at all -- "not logged in"
+        right after signing in, for no reason the reader can see. A rename is
+        atomic, so a reader sees the whole of whichever version it opens.
+        """
         if path is None:
             path = Path.home() / ".corerun" / "config"
 
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(path, "w") as f:
+        pending = path.with_name(path.name + ".new")
+        with open(pending, "w") as f:
             if self.auth_token:
                 f.write(f"auth_token={self.auth_token}\n")
             if self.refresh_token:
@@ -124,10 +211,13 @@ class Config:
             if self.workspace:
                 f.write(f"workspace={self.workspace}\n")
             f.write(f"api_url={self.api_url}\n")
-            f.write(f"inference_url={self.inference_url}\n")
+            if self.inference_url:
+                f.write(f"inference_url={self.inference_url}\n")
             f.write(f"timeout={self.timeout}\n")
             if not self.verify_ssl:
                 f.write("verify_ssl=false\n")
+
+        os.replace(pending, path)
 
 
 def _apply_platform_credential(config: "Config") -> None:

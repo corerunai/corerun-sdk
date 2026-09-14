@@ -459,7 +459,7 @@ def _run_pull(repo_url: str, target, api_key: str, commit: str) -> None:
         model_dir = pull_repo(repo_url, target, api_key, revision=commit, report=report)
 
     console.print(f"[green]Pulled to {model_dir}[/green]")
-    console.print(f"  Serve it with: corerun inference create --model-path {model_dir}")
+    console.print(f"  Serve it with: corerun inference deploy --model-path {model_dir}")
 
 
 def _short_name(path: str) -> str:
@@ -562,39 +562,6 @@ def _tenant_id(workspace: Optional[str]) -> str:
     if not tenant:
         raise Exception("Could not determine your tenant; pass a repository URL instead")
     return tenant
-
-
-@app.command("stage")
-def transition_stage(
-    name: str = typer.Argument(..., help="Model name"),
-    version: int = typer.Argument(..., help="Version number"),
-    stage: str = typer.Argument(..., help="Target stage (none, staging, production, archived)"),
-    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
-):
-    """
-    Transition a version to a new stage.
-
-    Example:
-        corerun models stage my-model 1 staging
-        corerun models stage my-model 1 production
-        corerun models stage my-model 1 archived
-    """
-    _init_client()
-
-    import corerun.registry as registry
-
-    valid_stages = ["none", "staging", "production", "archived"]
-    if stage.lower() not in valid_stages:
-        console.print(f"[red]Error:[/red] Invalid stage. Must be one of: {', '.join(valid_stages)}")
-        raise typer.Exit(1)
-
-    try:
-        v = registry.transition_stage(name, version, stage, workspace=workspace)
-        stage_text = f"[{_stage_style(v.stage)}]{v.stage}[/]"
-        console.print(f"[green]Transitioned {name}:v{version} to {stage_text}[/green]")
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
 
 
 # =============================================================================
@@ -703,165 +670,6 @@ def list_aliases(
 # =============================================================================
 # Inference Commands
 # =============================================================================
-
-
-@app.command("predict")
-def predict_command(
-    name: str = typer.Argument(..., help="Model name"),
-    input_file: str = typer.Argument(..., help="Input file path (JSON, CSV, or image)"),
-    version: Optional[int] = typer.Option(None, "--version", "-v", help="Version number"),
-    alias: Optional[str] = typer.Option(None, "--alias", "-a", help="Alias (e.g., champion)"),
-    output_file: Optional[str] = typer.Option(None, "--output", "-o", help="Output file path"),
-    framework: Optional[str] = typer.Option(None, "--framework", "-f", help="Model framework"),
-    device: Optional[str] = typer.Option(None, "--device", "-d", help="Device (cpu, cuda, mps)"),
-    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
-    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
-):
-    """
-    Run inference on input data using a registered model.
-
-    Supports JSON, CSV, and image files as input.
-
-    Example:
-        corerun models predict my-model input.json --alias champion
-        corerun models predict my-model image.jpg --version 1 -o result.json
-        corerun models predict my-model data.csv --alias production --json
-    """
-    _init_client()
-
-    import corerun.registry as registry
-    from pathlib import Path
-
-    if version is None and alias is None:
-        console.print("[red]Error:[/red] Must specify --version or --alias")
-        raise typer.Exit(1)
-
-    input_path = Path(input_file)
-    if not input_path.exists():
-        console.print(f"[red]Error:[/red] Input file not found: {input_file}")
-        raise typer.Exit(1)
-
-    try:
-        # Load input data based on file type
-        inputs = _load_input_data(input_path)
-
-        # Get predictor
-        console.print(f"Loading model {name}...")
-        predictor = registry.get_predictor(
-            name=name,
-            version=version,
-            alias=alias,
-            framework=framework,
-            device=device,
-            workspace=workspace,
-        )
-
-        # Run prediction
-        console.print("Running inference...")
-        result = predictor.predict(inputs)
-
-        # Convert result to serializable format
-        output_data = _serialize_result(result)
-
-        # Output results
-        if output_file:
-            output_path = Path(output_file)
-            with open(output_path, "w") as f:
-                json_lib.dump(output_data, f, indent=2, default=str)
-            console.print(f"[green]Results saved to {output_file}[/green]")
-        elif json_output:
-            output.emit(output_data)
-        else:
-            console.print("[bold]Prediction Result:[/bold]")
-            if isinstance(output_data, list):
-                for i, item in enumerate(output_data[:10]):
-                    console.print(f"  [{i}] {item}")
-                if len(output_data) > 10:
-                    console.print(f"  ... and {len(output_data) - 10} more")
-            else:
-                console.print(f"  {output_data}")
-
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        raise typer.Exit(1)
-
-
-def _load_input_data(path: "Path") -> any:
-    """Load input data from file based on extension."""
-    suffix = path.suffix.lower()
-
-    if suffix == ".json":
-        with open(path) as f:
-            return json_lib.load(f)
-    elif suffix == ".csv":
-        try:
-            import pandas as pd
-            df = pd.read_csv(path)
-            return df.values.tolist()
-        except ImportError:
-            # Fallback to basic CSV reading
-            import csv
-            with open(path) as f:
-                reader = csv.reader(f)
-                next(reader)  # Skip header
-                return [row for row in reader]
-    elif suffix in (".jpg", ".jpeg", ".png", ".bmp", ".gif"):
-        try:
-            from PIL import Image
-            return Image.open(path)
-        except ImportError:
-            console.print("[yellow]Warning:[/yellow] PIL not installed, loading as bytes")
-            with open(path, "rb") as f:
-                return f.read()
-    elif suffix == ".npy":
-        try:
-            import numpy as np
-            return np.load(path)
-        except ImportError:
-            raise ValueError("NumPy required to load .npy files")
-    elif suffix == ".pt":
-        try:
-            import torch
-            return torch.load(path)
-        except ImportError:
-            raise ValueError("PyTorch required to load .pt files")
-    else:
-        # Try JSON as default
-        try:
-            with open(path) as f:
-                return json_lib.load(f)
-        except json_lib.JSONDecodeError:
-            with open(path, "rb") as f:
-                return f.read()
-
-
-def _serialize_result(result: any) -> any:
-    """Convert prediction result to JSON-serializable format."""
-    # Handle PyTorch tensors
-    try:
-        import torch
-        if isinstance(result, torch.Tensor):
-            return result.detach().cpu().numpy().tolist()
-    except ImportError:
-        pass
-
-    # Handle NumPy arrays
-    try:
-        import numpy as np
-        if isinstance(result, np.ndarray):
-            return result.tolist()
-    except ImportError:
-        pass
-
-    # Handle lists of tensors/arrays
-    if isinstance(result, (list, tuple)):
-        return [_serialize_result(item) for item in result]
-
-    # Handle dicts
-    if isinstance(result, dict):
-        return {k: _serialize_result(v) for k, v in result.items()}
-
-    return result
 
 
 def _default_model_name(huggingface_id: str) -> str:

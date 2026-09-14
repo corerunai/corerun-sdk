@@ -43,7 +43,7 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from corerun.config import get_client
 
@@ -100,10 +100,14 @@ class EvalRun(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
-    dataset_id: str
+    dataset_id: str = ""
     dataset_name: Optional[str] = None
+    # A public benchmark the run measures, when it measures one instead of a
+    # dataset the workspace made.
+    benchmark: Optional[str] = None
+    benchmark_limit: Optional[int] = None
     llm_config: EvalModelConfig = Field(alias="model_config")
-    scorers: List[str]
+    scorers: List[str] = []
     judge_config: Optional[Dict[str, Any]] = None
     status: str                         # "pending", "running", "completed", "failed"
     progress: int = 0
@@ -113,6 +117,13 @@ class EvalRun(BaseModel):
     updated_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+
+    @field_validator("scorers", mode="before")
+    @classmethod
+    def _no_scorers_is_empty(cls, value):
+        """A benchmark run has no scorers of its own, and the API says so with
+        null rather than an empty list."""
+        return value or []
 
     @property
     def is_finished(self) -> bool:
@@ -219,40 +230,6 @@ def get_dataset(dataset_id: str, workspace: Optional[str] = None) -> EvalDataset
     return EvalDataset(**response)
 
 
-def update_dataset(
-    dataset_id: str,
-    name: Optional[str] = None,
-    schema: Optional[List[Dict[str, Any]]] = None,
-    description: Optional[str] = None,
-    examples: Optional[List[Dict[str, Any]]] = None,
-    tags: Optional[Dict[str, str]] = None,
-    workspace: Optional[str] = None,
-) -> EvalDataset:
-    """
-    Update an evaluation dataset.
-
-    Returns:
-        Updated EvalDataset object
-    """
-    client = get_client()
-
-    # Fetch current state to fill required fields
-    current = get_dataset(dataset_id, workspace=workspace)
-    body: Dict[str, Any] = {
-        "name": name or current.name,
-        "schema": schema or [c.model_dump() for c in current.columns],
-    }
-    if description is not None:
-        body["description"] = description
-    if examples is not None:
-        body["examples"] = examples
-    if tags is not None:
-        body["tags"] = tags
-
-    response = client.put(f"/evaluations/datasets/{dataset_id}", json=body, workspace=workspace)
-    return EvalDataset(**response)
-
-
 def delete_dataset(dataset_id: str, workspace: Optional[str] = None) -> None:
     """
     Delete an evaluation dataset.
@@ -270,19 +247,25 @@ def delete_dataset(dataset_id: str, workspace: Optional[str] = None) -> None:
 
 def create_run(
     name: str,
-    dataset_id: str,
-    model_config: Dict[str, Any],
-    scorers: List[str],
+    dataset_id: str = "",
+    model_config: Dict[str, Any] = None,
+    scorers: List[str] = None,
     description: Optional[str] = None,
     judge_config: Optional[Dict[str, Any]] = None,
+    benchmark: str = "",
+    benchmark_limit: int = 0,
     workspace: Optional[str] = None,
 ) -> EvalRun:
     """
     Create an evaluation run (starts in pending state).
 
+    A run measures one of two things: a dataset the workspace made, scored by
+    the scorers named beside it, or a public benchmark, which brings both its
+    examples and its scorer. Say which with `dataset_id` or `benchmark`.
+
     Args:
         name: Run name
-        dataset_id: Evaluation dataset ID
+        dataset_id: Evaluation dataset ID (with `scorers`, for a dataset run)
         model_config: Model configuration dict with keys:
             type (str: "inference_endpoint" or "external_api"),
             model (str: model name),
@@ -293,6 +276,8 @@ def create_run(
         scorers: List of scorer IDs (e.g. ["correctness", "fluency"])
         description: Optional description
         judge_config: Optional judge model config dict
+        benchmark: A public benchmark's name (e.g. "gsm8k"), instead of a dataset
+        benchmark_limit: How many of its examples to run; 0 means all of them
         workspace: Workspace ID (uses default if not specified)
 
     Returns:
@@ -309,15 +294,33 @@ def create_run(
             },
             scorers=["correctness", "fluency", "latency"],
         )
+
+        # Or a public benchmark, which needs no dataset and no scorers:
+        run = corerun.evaluations.create_run(
+            name="gsm8k-check",
+            benchmark="gsm8k",
+            benchmark_limit=50,
+            model_config={"type": "inference_endpoint", "endpoint_id": "...", "model": "..."},
+        )
     """
+    if not benchmark and not dataset_id:
+        raise ValueError("a run needs a dataset_id or a benchmark")
+    if dataset_id and not scorers:
+        raise ValueError("a dataset run needs at least one scorer")
+
     client = get_client()
 
     body: Dict[str, Any] = {
         "name": name,
-        "dataset_id": dataset_id,
-        "model_config": model_config,
-        "scorers": scorers,
+        "model_config": model_config or {},
     }
+    if dataset_id:
+        body["dataset_id"] = dataset_id
+        body["scorers"] = scorers or []
+    if benchmark:
+        body["benchmark"] = benchmark
+        if benchmark_limit:
+            body["benchmark_limit"] = benchmark_limit
     if description:
         body["description"] = description
     if judge_config:

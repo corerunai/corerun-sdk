@@ -45,13 +45,27 @@ DateTime = Annotated[datetime, BeforeValidator(parse_datetime)]
 # =============================================================================
 
 class JobStatus(str, Enum):
-    """Job status values"""
+    """Job status values.
+
+    "stopped" and "deploying" are what a host reports: a container that was
+    asked to stop, and one still being created. Leaving them out made the whole
+    job list unreadable -- one unlisted status fails the model for every job in
+    the response, not just that one.
+    """
     PENDING = "pending"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    STOPPED = "stopped"
+    DEPLOYING = "deploying"
+
+    def __str__(self) -> str:
+        # Without this an f-string prints "JobStatus.RUNNING": a str-Enum's
+        # __format__ gives the member, not its value, and every table in the
+        # CLI shows this one.
+        return self.value
 
 
 class DatasetSource(str, Enum):
@@ -381,29 +395,6 @@ class ModelAlias(BaseModel):
         return f"ModelAlias(model='{self.model_name}', alias='{self.alias}', version={self.version})"
 
 
-class PresignedURL(BaseModel):
-    """Presigned URL for upload/download"""
-    url: str
-    method: str = "PUT"
-    expires_at: Optional[DateTime] = None
-
-
 # =============================================================================
 # Model Registry Request Models
 # =============================================================================
-
-class CreateModelRequest(BaseModel):
-    """Request to create a registered model"""
-    name: str
-    description: Optional[str] = None
-    tags: Dict[str, str] = Field(default_factory=dict)
-
-
-class CreateModelVersionRequest(BaseModel):
-    """Request to create a model version"""
-    storage_path: str
-    run_id: Optional[str] = None
-    framework: Optional[str] = None
-    description: Optional[str] = None
-    size_bytes: int = 0
-    metadata: Dict[str, Any] = Field(default_factory=dict)

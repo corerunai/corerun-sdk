@@ -140,6 +140,11 @@ class CreateInferenceServerRequest(BaseModel):
     extra_args: Optional[List[str]] = None
     served_model_names: Optional[List[str]] = None
 
+    # Where some of those extra args came from, when they came from the model's
+    # published recipe rather than from a person.
+    recipe_source: Optional[str] = None
+    recipe_note: Optional[str] = None
+
     # vLLM-specific options
     max_model_len: Optional[int] = None
     tensor_parallel: Optional[int] = None
@@ -508,6 +513,67 @@ def restart(server_id: str, workspace: Optional[str] = None) -> dict:
     return client.post(f"/inference-servers/{server_id}/restart", workspace=workspace)
 
 
+def update(
+    server_id: str,
+    *,
+    image: Optional[str] = None,
+    extra_args: Optional[List[str]] = None,
+    gpu: Optional[float] = None,
+    max_model_len: Optional[int] = None,
+    enforce_eager: Optional[bool] = None,
+    workspace: Optional[str] = None,
+) -> InferenceServer:
+    """
+    Change how an inference server runs, and deploy it again.
+
+    The engine reads its flags when it starts, so a change means replacing the
+    workload -- but not the server. It keeps its ID, its endpoint and its key,
+    which is what callers hold; making a new server instead would move every
+    one of them.
+
+    Args:
+        server_id: Server ID
+        image: Container image to run instead
+        extra_args: Engine flags, passed through as given. This is how a model
+            is launched with something the platform does not model -- tool
+            calling, most commonly: vLLM needs --enable-auto-tool-choice and a
+            --tool-call-parser before it will accept tools at all.
+        gpu: GPUs to allocate
+        max_model_len: Maximum sequence length
+        enforce_eager: Disable CUDA graphs, for GPUs that need it
+        workspace: Workspace ID (uses default if not specified)
+
+    Returns:
+        The server, deploying the change
+
+    Example:
+        # Give a served model the ability to call tools
+        corerun.inference.update(
+            "abc123",
+            extra_args=["--enable-auto-tool-choice", "--tool-call-parser", "hermes"],
+        )
+    """
+    body = {
+        key: value
+        for key, value in {
+            "image": image,
+            "extra_args": extra_args,
+            "gpu": gpu,
+            "max_model_len": max_model_len,
+            "enforce_eager": enforce_eager,
+        }.items()
+        if value is not None
+    }
+    if not body:
+        raise ValueError("nothing to change: name at least one setting")
+
+    client = get_client()
+    response = client.put(f"/inference-servers/{server_id}", json=body, workspace=workspace)
+    # The update endpoint answers with the server itself, unlike restart, which
+    # answers with a message: this one returns something that changed.
+    return InferenceServer(**response)
+
+
 def list_types(workspace: Optional[str] = None) -> list:
     """
     List available inference server types and their default images.
@@ -535,6 +601,192 @@ def list_types(workspace: Optional[str] = None) -> list:
         }
         for t in (types or [])
     ]
+
+
+class ServingRecipe(BaseModel):
+    """How a model's publisher says it should be served."""
+
+    model_id: str
+    found: bool
+    # Everything below is empty when found is False, and reason says why.
+    hf_id: str = ""
+    title: str = ""
+    provider: str = ""
+    args: List[str] = []
+    image: str = ""
+    min_vllm_version: str = ""
+    context_length: int = 0
+    hardware: str = ""
+    note: str = ""
+    source: str = ""
+    reason: str = ""
+
+
+def recipe(model_id: str, workspace: Optional[str] = None) -> ServingRecipe:
+    """
+    How a model's publisher says it should be served.
+
+    Deployments take these engine arguments as defaults: a flag the deployment
+    sets itself -- in its own extra args, or through a field the platform has a
+    name for -- wins, and the recipe fills in the rest. Worth reading before a
+    deployment, because the flag that matters most is invisible without it:
+    a model launched without its tool-call parser cannot call tools at all.
+
+    Args:
+        model_id: Model id as the registry or HuggingFace knows it
+        workspace: Workspace ID (uses default if not specified)
+
+    Returns:
+        ServingRecipe, with found=False when nobody has published one
+
+    Example:
+        r = corerun.inference.recipe("Qwen/Qwen3.8-27B")
+        if r.found:
+            print(r.args, r.hardware)
+    """
+    client = get_client()
+    response = client.get(
+        "/inference-servers/recipe", params={"model": model_id}, workspace=workspace
+    )
+    response = response or {}
+    body = response.get("recipe") or {}
+    return ServingRecipe(
+        model_id=response.get("model", model_id),
+        found=bool(response.get("found")),
+        hf_id=body.get("hf_id", ""),
+        title=body.get("title", ""),
+        provider=body.get("provider", ""),
+        args=body.get("args") or [],
+        image=body.get("image", ""),
+        min_vllm_version=body.get("min_vllm_version", ""),
+        context_length=body.get("context_length") or 0,
+        hardware=body.get("hardware", ""),
+        note=body.get("note", ""),
+        source=body.get("source", ""),
+        reason=response.get("reason", ""),
+    )
+
+
+def plan(server_id: str, workspace: Optional[str] = None) -> dict:
+    """
+    What this server's next deployment would run with.
+
+    The engine arguments a deployment would use, resolved the same way the
+    deployment resolves them: the server's own fields, the accelerator's own
+    arguments, and the model's published recipe, with the provenance of each.
+    Nothing is deployed, so this is how to see the arguments of a server that
+    is already serving -- or to check what a change would do before making it.
+
+    Args:
+        server_id: Server ID
+        workspace: Workspace ID (uses default if not specified)
+
+    Returns:
+        Dict with image, extra_args and where each part came from
+
+    Example:
+        plan = corerun.inference.plan("abc123")
+        print(" ".join(plan["extra_args"]))
+    """
+    client = get_client()
+    return client.get(f"/inference-servers/{server_id}/plan", workspace=workspace) or {}
+
+
+class CatalogueModel(BaseModel):
+    """A model the platform already knows something about."""
+
+    slug: str
+    name: str
+    description: Optional[str] = None
+    source: Optional[str] = None
+    external_id: Optional[str] = None
+    quantization: Optional[str] = None
+    parameter_count: Optional[str] = None
+    context_length: int = 0
+    requires_engine: Optional[str] = None
+    min_engine_version: Optional[str] = None
+    # What this build needs to fit and how many cards it wants, as the
+    # publisher stated for this variant -- the numbers a deployment is really
+    # choosing between when it picks a precision.
+    min_gpu_memory_gb: int = 0
+    tensor_parallel: int = 0
+    tags: Optional[dict] = None
+
+    @property
+    def features(self) -> List[str]:
+        """Capabilities this model has, as the publisher lists them."""
+        labels = (self.tags or {}).get("labels") or []
+        return [l[len("supports "):] for l in labels if l.startswith("supports ")]
+
+    @property
+    def variants(self) -> dict:
+        """The other builds of this model, by name."""
+        return (self.tags or {}).get("variants") or {}
+
+
+def catalogue(
+    limit: int = 0,
+    engine: Optional[str] = None,
+    workspace: Optional[str] = None,
+) -> List[CatalogueModel]:
+    """
+    The models available to deploy, as the catalogue lists them.
+
+    Not the same thing as the model registry: the registry holds models this
+    workspace has, with weights in its own storage, while the catalogue holds
+    models the platform knows something about -- how much context they hold,
+    which engine serves them, which checkpoint they came from. A deployment can
+    name either.
+
+    Args:
+        limit: Only the first N, for a quick look
+        engine: Only models this engine serves (vllm, sglang, triton)
+        workspace: Workspace ID (uses default if not specified)
+
+    Returns:
+        List of CatalogueModel
+
+    Example:
+        for model in corerun.inference.catalogue(engine="vllm")[:10]:
+            print(model.name, model.external_id)
+    """
+    client = get_client()
+    params = {"engine": engine} if engine else None
+    response = client.get("/inference-servers/catalog/models", params=params, workspace=workspace)
+    rows = (response or {}).get("models") or []
+    models = [
+        CatalogueModel(
+            slug=row.get("Slug", ""),
+            name=row.get("Name", ""),
+            description=row.get("Description"),
+            source=row.get("Source"),
+            external_id=row.get("ExternalID"),
+            quantization=row.get("Quantization"),
+            parameter_count=row.get("ParameterCount"),
+            context_length=row.get("ContextLength") or 0,
+            requires_engine=row.get("RequiresEngine"),
+            min_engine_version=row.get("MinEngineVersion"),
+            min_gpu_memory_gb=row.get("MinGPUMemoryGB") or 0,
+            tensor_parallel=row.get("TensorParallel") or 0,
+            tags=row.get("Tags"),
+        )
+        for row in rows
+    ]
+    return models[:limit] if limit > 0 else models
+
+
+def catalogue_entry(reference: str, workspace: Optional[str] = None) -> Optional[CatalogueModel]:
+    """
+    One catalogue entry, by slug or by the model id its weights are fetched by.
+
+    Example:
+        model = corerun.inference.catalogue_entry("qwen3-8-27b-nvfp4")
+    """
+    wanted = reference.strip().lower()
+    for model in catalogue(workspace=workspace):
+        if model.slug.lower() == wanted or (model.external_id or "").lower() == wanted:
+            return model
+    return None
 
 
 def delete(server_id: str, workspace: Optional[str] = None) -> None:
@@ -594,28 +846,3 @@ def wait_for_running(
 
     raise TimeoutError(f"Inference server {server_id} did not start within {timeout}s")
 
-
-def regenerate_api_key(
-    server_id: str,
-    workspace: Optional[str] = None,
-) -> str:
-    """
-    Regenerate the API key for an inference server.
-
-    Args:
-        server_id: Server ID
-        workspace: Workspace ID (uses default if not specified)
-
-    Returns:
-        New API key string
-
-    Example:
-        new_key = corerun.inference.regenerate_api_key("abc123")
-        print(f"New API key: {new_key}")
-    """
-    client = get_client()
-    response = client.post(
-        f"/inference-servers/{server_id}/regenerate-key",
-        workspace=workspace,
-    )
-    return response.get("api_key", "")
