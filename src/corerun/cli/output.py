@@ -40,7 +40,14 @@ def set_json(enabled: bool) -> None:
     # import time -- console = output.console -- so rebinding the name here
     # would leave every one of them holding the old object and printing to
     # stdout regardless, which is precisely what JSON mode must not do.
-    console.file = sys.stderr if enabled else sys.stdout
+    #
+    # Not enabled is None rather than sys.stdout, which is rich's own default
+    # and means "the stdout in force when something is written". Naming the
+    # object instead freezes whichever stream that was at this moment, so a
+    # caller that later replaces stdout -- a redirect, a wrapper, a test
+    # harness -- leaves this writing to a stream nobody is reading, and to a
+    # closed one it raises.
+    console.file = sys.stderr if enabled else None
 
     if enabled:
         # Every command that has been taught to emit JSON does so through

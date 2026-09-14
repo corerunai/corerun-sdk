@@ -34,6 +34,9 @@ Usage:
     corerun inference scale <server-id> --min-replicas 2 --max-replicas 4
     corerun clusters list
     corerun clusters get gb10dgx01
+    corerun cluster add gpu1 --accelerator-family h100
+    corerun clusters token rotate gpu1
+    corerun host add dgx1
     corerun compute list
     corerun quota show
 """
@@ -50,6 +53,7 @@ from corerun.cli.datasets import app as datasets_app
 from corerun.cli.endpoints import app as endpoints_app
 from corerun.cli.evaluate import app as evaluate_app
 from corerun.cli.finetune import app as finetune_app
+from corerun.cli.hosts import app as hosts_app
 from corerun.cli.inference import app as inference_app
 from corerun.cli.jobs import app as jobs_app
 from corerun.cli.notebooks import app as notebooks_app
@@ -83,7 +87,11 @@ def main(
     output.set_json(json_output)
 
 # Add subcommands
-app.add_typer(accelerators_app, name="accelerators", help="Accelerator generations")
+app.add_typer(
+    accelerators_app,
+    name="accelerators",
+    help="Accelerator generations, and what this platform has been told",
+)
 app.add_typer(auth_app, name="auth", help="Authentication commands")
 app.add_typer(datasets_app, name="datasets", help="Dataset management")
 app.add_typer(jobs_app, name="jobs", help="Job management")
@@ -98,7 +106,8 @@ app.add_typer(inference_app, name="inference", help="Inference servers")
 app.add_typer(endpoints_app, name="endpoints", help="Model endpoints")
 app.add_typer(catalogue_app, name="catalogue", help="Models available from the catalogue")
 app.add_typer(catalogue_app, name="catalog", help="Alias for catalogue")
-app.add_typer(clusters_app, name="clusters", help="Cluster inspection")
+app.add_typer(clusters_app, name="clusters", help="Clusters, and adding one")
+app.add_typer(hosts_app, name="hosts", help="Bare-metal hosts")
 app.add_typer(compute_app, name="compute", help="Compute targets")
 app.add_typer(quota_app, name="quota", help="Workspace quota")
 app.add_typer(workspace_app, name="workspace", help="Workspace selection")
@@ -114,6 +123,9 @@ app.add_typer(finetune_app, name="ft", hidden=True)
 app.add_typer(evaluate_app, name="eval", hidden=True)
 app.add_typer(inference_app, name="serve", hidden=True)
 app.add_typer(clusters_app, name="cluster", hidden=True)
+# `host` is what people type and what the docs say; the group is plural
+# because every other group with several commands is.
+app.add_typer(hosts_app, name="host", hidden=True)
 # "ws" is what gets typed; both reach the same commands.
 app.add_typer(workspace_app, name="ws", hidden=True)
 

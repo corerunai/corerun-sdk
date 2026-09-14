@@ -2,14 +2,13 @@
 Cluster CLI commands
 """
 
-import json as _json
+import sys
 from typing import Optional
 
 import typer
-from rich.console import Console
+from rich.table import Table
 
 from corerun.cli import output
-from rich.table import Table
 
 console = output.console
 app = typer.Typer(help="Cluster inspection commands")
@@ -24,6 +23,20 @@ def _init_client():
         console.print(f"[red]Error:[/red] {e}")
         console.print("Run 'corerun login' to authenticate")
         raise typer.Exit(1)
+
+
+def _write_document(text: str) -> None:
+    """
+    Write a document to stdout exactly as it arrived.
+
+    Not console.print: this is a file, and rich would apply markup to it and
+    fold its long lines at the terminal width. And not print() either, which
+    appends its own newline -- a manifest already ends with one, so printing it
+    leaves a blank line that was never in the document.
+    """
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
 
 
 def _status_style(status: str) -> str:
@@ -211,3 +224,318 @@ def list_profiles(
         )
 
     console.print(table)
+
+
+@app.command("types")
+def list_types(
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
+):
+    """
+    List the cluster types a cluster can be added as.
+
+    A type carries defaults -- which GPU strategy a cluster uses, above all.
+    Adding a cluster takes its id, which is a UUID and not much use without
+    somewhere to look it up, so this is that somewhere.
+
+    Example:
+        corerun clusters types
+    """
+    _init_client()
+
+    import corerun.clusters as clusters
+
+    try:
+        items = clusters.types(workspace=workspace)
+    except Exception as e:
+        raise output.fail(str(e))
+
+    if not items:
+        console.print("No cluster types defined")
+        return
+
+    table = Table(title="Cluster types")
+    table.add_column("Name", style="cyan")
+    table.add_column("Display name")
+    table.add_column("GPU strategy")
+    table.add_column("ID", style="dim")
+
+    for t in items:
+        table.add_row(t.name, t.display_name or "-", t.gpu_strategy or "-", t.id)
+
+    console.print(table)
+
+
+@app.command("add")
+def add_cluster(
+    name: str = typer.Argument(..., metavar="NAME", help="Cluster name, e.g. gpu1"),
+    namespace: str = typer.Option(
+        "corerun", "--namespace", "-n", help="Namespace to install the connector into"
+    ),
+    architecture: str = typer.Option(
+        "amd64", "--architecture", "--arch", help="amd64 or arm64"
+    ),
+    accelerator_family: Optional[str] = typer.Option(
+        None,
+        "--accelerator-family",
+        "--gpu",
+        help="What this cluster's cards are: a family (hopper) or a card (h100). "
+        "Anything unrecognised is not refused -- the cluster is left to be "
+        "identified from what its connector reports. Check with "
+        "'corerun accelerators show <value>'.",
+    ),
+    cluster_type: Optional[str] = typer.Option(
+        None, "--cluster-type", help="A type's ID, from 'corerun clusters types'"
+    ),
+    tenant_wide: bool = typer.Option(
+        False,
+        "--tenant-wide",
+        help="Give it to the whole tenant rather than this workspace. Requires "
+        "tenant administrator standing.",
+    ),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
+):
+    """
+    Prepare a Kubernetes cluster so its connector can join.
+
+    Nothing connects here. This writes the cluster's manifest to stdout and what
+    to do with it to stderr, so `corerun cluster add gpu1 > cluster.yaml` leaves
+    a file you can apply. Apply it on the target and the cluster's connector phones
+    home on its own -- `corerun clusters list` shows when it has.
+
+    Adding a host instead? `corerun host add` -- a bare machine has no
+    Kubernetes to apply a manifest to, so it is onboarded differently.
+
+    Example:
+        corerun cluster add gpu1 --accelerator-family h100 > cluster.yaml
+        kubectl apply -f cluster.yaml
+    """
+    _init_client()
+
+    import corerun.clusters as clusters
+
+    try:
+        manifest = clusters.prepare(
+            name,
+            namespace=namespace,
+            architecture=architecture,
+            accelerator_family=accelerator_family,
+            cluster_type_id=cluster_type,
+            tenant_wide=tenant_wide,
+            workspace=workspace,
+        )
+    except Exception as e:
+        raise output.fail(str(e))
+
+    def render():
+        _write_document(manifest)
+        # Everything a person reads goes to stderr, so it cannot end up in the
+        # file somebody redirected.
+        output.errors.print(
+            f"\n[green]Prepared[/green] {name} [dim](backend kubernetes)[/dim]\n"
+            "Apply it on the cluster:\n"
+            "  [bold]kubectl apply -f -[/bold]   [dim](or the file you saved)[/dim]\n"
+            "[dim]It registers itself once its connector connects. Watch for it with "
+            "'corerun clusters list'.[/dim]"
+        )
+
+    output.emit({"name": name, "backend": "kubernetes", "manifest": manifest}, render)
+
+
+@app.command("manifest")
+def cluster_manifest(
+    name: str = typer.Argument(..., metavar="NAME", help="Cluster name"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
+):
+    """
+    The onboarding manifest for a cluster, as it stands now.
+
+    Worth re-fetching after rotating a token: the manifest you applied carries
+    the credential from the day it was generated, and it is the only copy.
+
+    A host-backed cluster answers with its installer script rather than a
+    manifest -- there is no Kubernetes to apply one to.
+
+    Example:
+        corerun clusters manifest gpu1 > cluster.yaml
+    """
+    _init_client()
+
+    import corerun.clusters as clusters
+
+    try:
+        document = clusters.connector_manifest(name, workspace=workspace)
+    except Exception as e:
+        raise output.fail(str(e))
+
+    def render():
+        _write_document(document)
+        output.errors.print(
+            f"\n[dim]This carries {name}'s current connector token. Its connector is "
+            "already using it, so applying this again on a connected cluster "
+            "changes nothing.[/dim]"
+        )
+
+    output.emit({"name": name, "manifest": document}, render)
+
+
+@app.command("rm")
+def remove_cluster(
+    name: str = typer.Argument(..., metavar="NAME", help="Cluster name"),
+    delete_namespace: bool = typer.Option(
+        False,
+        "--delete-namespace",
+        help="Delete the namespace too. Destructive, and off by default: the "
+        "namespace may hold more than this connector.",
+    ),
+    clean_kueue: bool = typer.Option(
+        False, "--clean-kueue", help="Delete the cluster's Kueue queues and flavours"
+    ),
+    clean_kai: bool = typer.Option(
+        False, "--clean-kai", help="Uninstall the KAI scheduler"
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation"),
+    tenant_wide: bool = typer.Option(
+        False,
+        "--tenant-wide",
+        help="Remove one the whole tenant owns. A workspace's route refuses "
+        "those; use this for anything added with --tenant-wide.",
+    ),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
+):
+    """
+    Remove a cluster and tear down what its connector installed.
+
+    The Helm release and RBAC are uninstalled by default. Nothing checks for
+    running workloads first, so a cluster with jobs on it is removed with its
+    jobs.
+
+    Example:
+        corerun clusters rm gpu1
+    """
+    _init_client()
+
+    if not yes and not output.json_mode():
+        typer.confirm(f"Remove the cluster '{name}' and its connector's resources?", abort=True)
+
+    import corerun.clusters as clusters
+
+    try:
+        result = clusters.remove(
+            name,
+            delete_namespace=delete_namespace,
+            clean_kueue=clean_kueue,
+            clean_kai=clean_kai,
+            tenant_wide=tenant_wide,
+            workspace=workspace,
+        )
+    except Exception as e:
+        message = str(e)
+        if "tenant_scoped" in message:
+            message += "\nThat cluster belongs to the whole tenant. Add --tenant-wide to remove it."
+        raise output.fail(message)
+
+    def render():
+        console.print(f"[green]Removed[/green] {name}")
+        for entry in result.get("cleanup") or []:
+            status = entry.get("status", "")
+            style = "green" if status in ("ok", "success") else "yellow"
+            console.print(
+                f"  [{style}]{entry.get('resource', '?')}[/{style}]"
+                f" [dim]{entry.get('message', '')}[/dim]"
+            )
+
+    output.emit(result, render)
+
+
+token_app = typer.Typer(help="The credential a cluster's connector connects with")
+app.add_typer(token_app, name="token")
+
+
+@token_app.command("rotate")
+def rotate_token(
+    name: str = typer.Argument(..., metavar="NAME", help="Cluster name"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
+):
+    """
+    Replace a cluster's connector token.
+
+    The old token stops working the moment this returns, and a connected connector
+    has no way to learn the new one -- so a cluster that is connected right now
+    will drop off until it is given the replacement. It does not come back on
+    its own.
+
+    To recover: re-fetch the manifest (`corerun clusters manifest NAME`) and
+    apply it on the cluster, or re-run the host's connect command.
+
+    Example:
+        corerun clusters token rotate gpu1
+    """
+    _init_client()
+
+    if not yes and not output.json_mode():
+        typer.confirm(
+            f"Rotate {name}'s token? A connected connector will drop off until it is "
+            "given the new one",
+            abort=True,
+        )
+
+    import corerun.clusters as clusters
+
+    try:
+        token = clusters.rotate_token(name, workspace=workspace)
+    except Exception as e:
+        raise output.fail(str(e))
+
+    def render():
+        console.print(f"[green]New token[/green] for {name}")
+        console.print(f"  {token}")
+        output.errors.print(
+            "[dim]The connector holding the previous one cannot reconnect. Re-apply "
+            f"the manifest to restore it: corerun clusters manifest {name}[/dim]"
+        )
+
+    output.emit({"name": name, "token": token}, render)
+
+
+@token_app.command("revoke")
+def revoke_token(
+    name: str = typer.Argument(..., metavar="NAME", help="Cluster name"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
+):
+    """
+    Clear a cluster's connector token, so its connector can no longer connect.
+
+    This stops the credential the cluster currently holds. A replacement token
+    its connector was already handed is not cleared, and the hub will still honour
+    it -- so this is not a way to cut off an connector you have lost track of.
+
+    Example:
+        corerun clusters token revoke gpu1
+    """
+    _init_client()
+
+    if not yes and not output.json_mode():
+        typer.confirm(
+            f"Revoke {name}'s connector token? Its connector will be locked out",
+            abort=True,
+        )
+
+    import corerun.clusters as clusters
+
+    try:
+        clusters.revoke_token(name, workspace=workspace)
+    except Exception as e:
+        raise output.fail(str(e))
+
+    result = {"name": name, "message": "Token revoked"}
+
+    def render():
+        console.print(f"[green]Revoked[/green] the connector token for {name}")
+        output.errors.print(
+            "[dim]Give it a new one with 'corerun clusters token rotate', then "
+            "re-apply the manifest.[/dim]"
+        )
+
+    output.emit(result, render)

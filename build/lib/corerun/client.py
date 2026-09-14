@@ -59,13 +59,21 @@ class CoreRunClient:
             headers["X-Workspace-ID"] = self.config.workspace
         return headers
 
-    def _handle_response(self, response: httpx.Response) -> Dict[str, Any]:
-        """Handle API response and raise appropriate errors"""
+    def _handle_response(self, response: httpx.Response, as_text: bool = False):
+        """Handle API response and raise appropriate errors
+
+        Returns the body as a string when as_text is set, and as decoded JSON
+        otherwise. Only the success body changes: the API answers an error as
+        JSON whatever the route serves on success, so the failure path below is
+        the same either way.
+        """
         # Any 2xx is a success. Listing them one at a time meant 202 read as an
         # error: creating a notebook answers "accepted, it is starting" as soon
         # as the record exists, and the CLI reported that as a failed create for
         # a notebook that was coming up perfectly well.
         if 200 <= response.status_code < 300:
+            if as_text:
+                return response.text
             if not response.content:
                 return {}
             return response.json()
@@ -97,8 +105,10 @@ class CoreRunClient:
         params: Optional[Dict[str, Any]] = None,
         json: Optional[Dict[str, Any]] = None,
         workspace: Optional[str] = None,
+        content_type: Optional[str] = None,
+        response_type: str = "json",
         **kwargs,
-    ) -> Dict[str, Any]:
+    ):
         """
         Make an API request.
 
@@ -108,9 +118,18 @@ class CoreRunClient:
             params: Query parameters
             json: JSON body
             workspace: Override workspace ID for this request
+            content_type: What the body is, when it is not JSON. A document a
+                person wrote may be YAML, and the default header would call it
+                JSON -- which is a lie a server is entitled to believe.
+            response_type: "json" (the default) or "text". A route that serves a
+                manifest or a script answers with the file itself, and decoding
+                that as JSON fails on the first line.
+            kwargs: Passed through to the transport, so `content=` sends bytes
+                this client does not interpret.
 
         Returns:
-            Response JSON as dict
+            Response JSON as dict, or the body as a string when response_type is
+            "text"
 
         Raises:
             CoreRunError: On API errors
@@ -118,6 +137,8 @@ class CoreRunClient:
         headers = {}
         if workspace:
             headers["X-Workspace-ID"] = workspace
+        if content_type:
+            headers["Content-Type"] = content_type
 
         response = self._send(method, path, params, json, headers, **kwargs)
 
@@ -128,7 +149,7 @@ class CoreRunClient:
         if response.status_code == 401 and self._refresh_credential():
             response = self._send(method, path, params, json, headers, **kwargs)
 
-        return self._handle_response(response)
+        return self._handle_response(response, as_text=(response_type == "text"))
 
     def _send(
         self,
@@ -253,9 +274,14 @@ class CoreRunClient:
         path: str,
         params: Optional[Dict[str, Any]] = None,
         workspace: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Make a GET request"""
-        return self.request("GET", path, params=params, workspace=workspace)
+        **kwargs,
+    ):
+        """Make a GET request.
+
+        kwargs reach the transport, so a caller reading a route that serves a
+        file rather than a document can pass `response_type="text"`.
+        """
+        return self.request("GET", path, params=params, workspace=workspace, **kwargs)
 
     def post(
         self,
@@ -264,7 +290,8 @@ class CoreRunClient:
         files: Optional[Dict[str, Any]] = None,
         data: Optional[Dict[str, Any]] = None,
         workspace: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        **kwargs,
+    ):
         """
         Make a POST request.
 
@@ -274,11 +301,13 @@ class CoreRunClient:
             files: Files to upload as multipart form data
             data: Form data fields (used with files)
             workspace: Override workspace ID
+            kwargs: Passed through to request(), so `response_type="text"` reads
+                a route whose success body is a manifest rather than JSON.
         """
         if files is not None:
             # Multipart form upload - need to handle differently
             return self._post_multipart(path, files=files, data=data, workspace=workspace)
-        return self.request("POST", path, json=json, workspace=workspace)
+        return self.request("POST", path, json=json, workspace=workspace, **kwargs)
 
     def download(
         self,
@@ -385,17 +414,29 @@ class CoreRunClient:
         path: str,
         json: Optional[Dict[str, Any]] = None,
         workspace: Optional[str] = None,
+        **kwargs,
     ) -> Dict[str, Any]:
-        """Make a PUT request"""
-        return self.request("PUT", path, json=json, workspace=workspace)
+        """Make a PUT request.
+
+        kwargs reach the transport, so a caller with a body this client does not
+        interpret -- a YAML document, say -- can pass `content=` and
+        `content_type=`.
+        """
+        return self.request("PUT", path, json=json, workspace=workspace, **kwargs)
 
     def delete(
         self,
         path: str,
+        json: Optional[Dict[str, Any]] = None,
         workspace: Optional[str] = None,
+        **kwargs,
     ) -> Dict[str, Any]:
-        """Make a DELETE request"""
-        return self.request("DELETE", path, workspace=workspace)
+        """Make a DELETE request.
+
+        DELETE carries a body here because removing a cluster takes options --
+        what to tear down along with it -- and the API reads them from one.
+        """
+        return self.request("DELETE", path, json=json, workspace=workspace, **kwargs)
 
     def close(self):
         """Close the HTTP client"""

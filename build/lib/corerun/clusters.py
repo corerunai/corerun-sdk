@@ -1,8 +1,13 @@
 """
 corerun clusters.
 
-Read-only access to the clusters a workspace can schedule onto, including live
-resource data reported by each cluster's connector.
+The clusters a workspace can schedule onto, including live resource data
+reported by each connector -- and what it takes to add one.
+
+A cluster is not created with a kubeconfig. It is *prepared*: a record is made
+with an connector credential, and the platform hands back something to apply on the
+target. Applying it makes the connector phone home and the cluster registers itself,
+which is why nothing here takes a cluster's address or its credentials.
 """
 
 from typing import List, Optional
@@ -139,3 +144,279 @@ def profiles(name: str, workspace: Optional[str] = None) -> list:
     if isinstance(response, dict):
         return response.get("profiles", [])
     return response
+
+
+class ClusterType(BaseModel):
+    """A label a cluster can be given, carrying defaults like its GPU strategy."""
+
+    id: str = ""
+    name: str = ""
+    display_name: str = ""
+    gpu_strategy: str = ""
+
+
+class HostEnrollment(BaseModel):
+    """What a bare host needs in order to join.
+
+    Both commands come from the API rather than being composed here: the install
+    one depends on where this deployment serves its connector binaries, which is a
+    platform setting the client has no business guessing.
+    """
+
+    name: str = ""
+    backend: str = "host"
+    architecture: str = ""
+    os: str = ""
+    enrollment_token: str = ""
+    install_command: str = ""
+    connect_command: str = ""
+    note: str = ""
+
+
+def types(workspace: Optional[str] = None) -> List[ClusterType]:
+    """
+    List the cluster types available to add a cluster as.
+
+    Args:
+        workspace: Workspace ID (uses default if not specified)
+
+    Returns:
+        List of ClusterType objects, platform-wide ones first
+
+    Example:
+        for t in corerun.clusters.types():
+            print(t.id, t.display_name or t.name)
+    """
+    client = get_client()
+    response = client.get("/cluster-types", workspace=workspace)
+    if isinstance(response, dict):
+        return [ClusterType.model_validate(t) for t in response.get("cluster_types", [])]
+    return []
+
+
+def _scope(tenant_wide: bool) -> bool:
+    """
+    The workspace_scope field, as the API reads it.
+
+    True means "put this in the caller's workspace"; false means "put it in the
+    tenant, visible to every workspace", which the API then checks as a tenant
+    administrator action. Sending false without that standing is a 403, not a
+    cluster, so the default is the narrower of the two.
+    """
+    return not tenant_wide
+
+
+def prepare(
+    name: str,
+    namespace: str = "corerun",
+    architecture: str = "amd64",
+    accelerator_family: Optional[str] = None,
+    cluster_type_id: Optional[str] = None,
+    tenant_wide: bool = False,
+    workspace: Optional[str] = None,
+) -> str:
+    """
+    Prepare a Kubernetes cluster for its connector, and return the manifest.
+
+    The cluster record is created here, but nothing is connected yet: what comes
+    back is a manifest to apply on the target cluster. Its connector connects to the
+    platform on its own, and the cluster becomes ready when it does.
+
+    Args:
+        name: Cluster name, unique within the tenant
+        namespace: Namespace to install the connector into
+        architecture: "amd64" or "arm64"
+        accelerator_family: A family (hopper) or a card (h100). Anything
+            unrecognised is not an error -- the cluster is simply left to be
+            identified from what its connector reports.
+        cluster_type_id: UUID of a cluster type from types()
+        tenant_wide: Create it for the whole tenant rather than this workspace
+        workspace: Workspace ID (uses default if not specified)
+
+    Returns:
+        The connector manifest, as YAML
+
+    Example:
+        manifest = corerun.clusters.prepare("gpu1", accelerator_family="h100")
+        open("gpu1.yaml", "w").write(manifest)
+    """
+    client = get_client()
+    body = {
+        "name": name,
+        "backend": "kubernetes",
+        "namespace": namespace,
+        "architecture": architecture,
+        "workspace_scope": _scope(tenant_wide),
+    }
+    if accelerator_family:
+        body["accelerator_family"] = accelerator_family
+    if cluster_type_id:
+        body["cluster_type_id"] = cluster_type_id
+
+    # The success body is the manifest itself, not JSON: the API answers
+    # text/yaml here, and the ordinary path would fail on the first line.
+    return client.post("/clusters/prepare", json=body, workspace=workspace, response_type="text")
+
+
+def prepare_host(
+    name: str,
+    architecture: str = "amd64",
+    os: str = "linux",
+    tenant_wide: bool = False,
+    workspace: Optional[str] = None,
+) -> HostEnrollment:
+    """
+    Prepare a bare-metal host for its connector, and return what it needs to join.
+
+    A host has no Kubernetes to apply a manifest to, so it is onboarded by
+    running two commands on the machine itself: one installs the connector, and
+    the second joins it with the enrollment token.
+
+    Args:
+        name: Cluster name, unique within the tenant
+        architecture: "amd64" or "arm64". Forced to "arm64" for darwin.
+        os: "linux" or "darwin"
+        tenant_wide: Create it for the whole tenant rather than this workspace
+        workspace: Workspace ID (uses default if not specified)
+
+    Returns:
+        HostEnrollment, holding the install and connect commands
+
+    Example:
+        e = corerun.clusters.prepare_host("dgx1")
+        print(e.install_command)
+        print(e.connect_command)
+    """
+    client = get_client()
+    response = client.post(
+        "/clusters/prepare",
+        json={
+            "name": name,
+            "backend": "host",
+            "architecture": architecture,
+            "os": os,
+            "workspace_scope": _scope(tenant_wide),
+        },
+        workspace=workspace,
+    )
+    return HostEnrollment.model_validate(response)
+
+
+def remove(
+    name: str,
+    clean_resources: bool = True,
+    delete_namespace: bool = False,
+    clean_kueue: bool = False,
+    clean_kai: bool = False,
+    tenant_wide: bool = False,
+    workspace: Optional[str] = None,
+) -> dict:
+    """
+    Remove a cluster.
+
+    Args:
+        name: Cluster name
+        clean_resources: Uninstall the connector's Helm release and RBAC
+        delete_namespace: Delete the Kubernetes namespace as well. Destructive,
+            and off by default: the namespace may hold more than the connector.
+        clean_kueue: Delete the cluster's Kueue queues and flavours
+        clean_kai: Uninstall the KAI scheduler
+        tenant_wide: Remove one the whole tenant owns. A workspace's route
+            refuses those -- it only removes what the workspace itself created
+            -- so the tenant's own route is the one that has to be used.
+        workspace: Workspace ID (uses default if not specified)
+
+    Returns:
+        The API's response, including a per-resource cleanup report
+
+    Example:
+        corerun.clusters.remove("gpu1", confirm_name="gpu1")
+    """
+    client = get_client()
+    # Every field is sent explicitly. The API defaults clean_resources to true
+    # only when it cannot parse a body at all, so omitting it here would turn
+    # off the cleanup a caller expects to have happened.
+    # Which route removes it is decided by who owns it, not by who is asking:
+    # /clusters/:name answers 403 tenant_scoped for a tenant-wide cluster, so a
+    # caller who created one with tenant_wide=True has to say so again here.
+    path = f"/tenant/shared/clusters/{name}" if tenant_wide else f"/clusters/{name}"
+
+    return client.delete(
+        path,
+        json={
+            "confirm_name": name,
+            "clean_resources": clean_resources,
+            "delete_namespace": delete_namespace,
+            "clean_kueue": clean_kueue,
+            "clean_kai": clean_kai,
+        },
+        workspace=workspace,
+    )
+
+
+def connector_manifest(name: str, workspace: Optional[str] = None) -> str:
+    """
+    The onboarding artefact for a cluster, as it stands now.
+
+    YAML for a Kubernetes cluster; the installer script for a host-backed one.
+    Re-fetching is worth doing after rotating a token, since the manifest you
+    applied carries the credential of the day it was generated.
+
+    Args:
+        name: Cluster name
+        workspace: Workspace ID (uses default if not specified)
+
+    Returns:
+        The manifest or installer, as text
+
+    Example:
+        print(corerun.clusters.connector_manifest("gpu1"))
+    """
+    client = get_client()
+    return client.get(
+        f"/clusters/{name}/connector-manifest", workspace=workspace, response_type="text"
+    )
+
+
+def rotate_token(name: str, workspace: Optional[str] = None) -> str:
+    """
+    Replace a cluster's connector token, and return the new one.
+
+    The previous token stops working immediately. There is no grace period and
+    no way for a connected connector to learn the replacement, so a cluster that is
+    currently connected will drop off until it is given the new token. Re-apply
+    the manifest from connector_manifest() afterwards.
+
+    Args:
+        name: Cluster name
+        workspace: Workspace ID (uses default if not specified)
+
+    Returns:
+        The new connector token
+
+    Example:
+        corerun.clusters.rotate_token("gpu1")
+    """
+    client = get_client()
+    response = client.post(f"/clusters/{name}/token", workspace=workspace)
+    return response.get("token", "")
+
+
+def revoke_token(name: str, workspace: Optional[str] = None) -> None:
+    """
+    Clear a cluster's connector token, so its connector can no longer connect.
+
+    Note that a token the connector has *already* been given as a replacement -- by
+    a cluster that re-onboarded, say -- is not cleared by this, and the hub will
+    still honour it. This stops the cluster's current credential, not every
+    credential that has ever been valid.
+
+    Args:
+        name: Cluster name
+        workspace: Workspace ID (uses default if not specified)
+
+    Example:
+        corerun.clusters.revoke_token("gpu1")
+    """
+    client = get_client()
+    client.delete(f"/clusters/{name}/token", workspace=workspace)
