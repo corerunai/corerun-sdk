@@ -1,9 +1,10 @@
 # corerun skills
 
-Seven skills that teach a coding agent to drive corerun through its CLI.
+Eight skills that teach a coding agent to drive corerun through its CLI.
 
 | Skill | What it covers |
 |---|---|
+| `corerun-workspaces` | Creating workspaces, storage accounts, clusters and hosts |
 | `corerun-quota` | What the workspace has room for, before allocating anything |
 | `corerun-datasets` | Finding, importing and inspecting datasets |
 | `corerun-jobs` | Submitting, monitoring and debugging training jobs |
@@ -73,3 +74,11 @@ specialise a model on a dataset" is doing the work; "fine-tuning helper" is not.
 **Say what not to do, and why.** These skills act on shared infrastructure.
 `corerun-quota` telling an agent not to free room by stopping someone else's
 endpoint is worth more than another example of the command it already knows.
+
+**Only write commands that exist.** A skill is read as fact, so an invented
+flag or a command that was renamed is worse than saying nothing: the agent
+tries it, gets an error it cannot interpret, and has no way to tell which half
+of the skill to trust. `corerun models stage` was documented here for a while
+before anything implemented it. Check against `corerun <group> --help` when
+editing, and prefer adding the missing command to trimming the skill down to
+what happens to exist.

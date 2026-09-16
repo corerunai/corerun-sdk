@@ -61,6 +61,8 @@ from corerun.cli.prompts import app as prompts_app
 from corerun.cli.quota import app as quota_app
 from corerun.cli.registry import app as registry_app
 from corerun.cli.skills import app as skills_app
+from corerun.cli.storage import app as storage_app
+from corerun.cli.groups import app as groups_app
 from corerun.cli.workspace import app as workspace_app
 from corerun.cli import output
 from corerun.cli.traces import app as traces_app
@@ -110,7 +112,9 @@ app.add_typer(clusters_app, name="clusters", help="Clusters, and adding one")
 app.add_typer(hosts_app, name="hosts", help="Bare-metal hosts")
 app.add_typer(compute_app, name="compute", help="Compute targets")
 app.add_typer(quota_app, name="quota", help="Workspace quota")
+app.add_typer(storage_app, name="storage", help="Storage accounts")
 app.add_typer(workspace_app, name="workspace", help="Workspace selection")
+app.add_typer(groups_app, name="groups", help="Groups, and the roles they hold")
 
 # Aliases for convenience
 app.add_typer(datasets_app, name="data", hidden=True)
@@ -128,6 +132,7 @@ app.add_typer(clusters_app, name="cluster", hidden=True)
 app.add_typer(hosts_app, name="host", hidden=True)
 # "ws" is what gets typed; both reach the same commands.
 app.add_typer(workspace_app, name="ws", hidden=True)
+app.add_typer(groups_app, name="group", hidden=True)
 
 
 @app.command()

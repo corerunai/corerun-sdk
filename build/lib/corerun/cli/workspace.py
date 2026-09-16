@@ -13,7 +13,7 @@ from corerun.cli import output
 from corerun.config import get_config
 
 console = output.console
-app = typer.Typer(help="Workspace selection")
+app = typer.Typer(help="Workspaces: which one you work in, and making or removing them")
 
 
 def _require_credentials():
@@ -244,3 +244,163 @@ def show_workspace():
             else config.workspace
         ),
     )
+
+
+# The capability keys the platform recognises, in the order the console lists
+# them. Kept here rather than fetched so `--help` can name them offline.
+CAPABILITIES = ("notebooks", "training", "models", "prompts", "datasets", "images", "endpoints")
+
+
+@app.command("create")
+def create_workspace(
+    name: str = typer.Argument(..., help="Display name, e.g. 'ML Research'"),
+    slug: str = typer.Option(None, "--slug", help="URL and CLI name; derived from the name if omitted"),
+    capabilities: str = typer.Option(
+        None,
+        "--capabilities",
+        "-c",
+        help=f"Comma-separated subset of: {', '.join(CAPABILITIES)}. All of them if omitted.",
+    ),
+    use: bool = typer.Option(False, "--use", help="Make it the workspace this CLI acts in"),
+):
+    """
+    Create a workspace.
+
+    Storage comes from the organization's shared account when it has one: the
+    workspace gets a bucket of its own, and on ObjectIO a credential confined
+    to it.
+
+    Example:
+        corerun ws create "ML Research"
+        corerun ws create "Speech" --slug speech --capabilities notebooks,training
+        corerun ws create "Scratch" --use
+    """
+    import httpx
+
+    config = _require_credentials()
+
+    derived = slug or _slugify(name)
+    if not derived:
+        console.print("[red]Error:[/red] could not derive a slug from that name; pass --slug")
+        raise typer.Exit(1)
+
+    payload = {"slug": derived, "display_name": name}
+    if capabilities:
+        wanted = [c.strip().lower() for c in capabilities.split(",") if c.strip()]
+        unknown = [c for c in wanted if c not in CAPABILITIES]
+        if unknown:
+            console.print(f"[red]Error:[/red] unknown capability: {', '.join(unknown)}")
+            console.print(f"  Known: {', '.join(CAPABILITIES)}")
+            raise typer.Exit(1)
+        payload["capabilities"] = wanted
+
+    url = config.api_url.rstrip("/") + "/workspaces"
+    try:
+        response = httpx.post(
+            url,
+            headers={"Authorization": f"Bearer {config.auth_token}"},
+            json=payload,
+            timeout=60.0,
+            verify=config.verify_ssl,
+        )
+    except httpx.ConnectError as e:
+        from corerun.exceptions import unreachable
+
+        raise unreachable(url, e) from e
+
+    if response.status_code not in (200, 201):
+        console.print(f"[red]Error:[/red] {_message(response)}")
+        raise typer.Exit(1)
+
+    created = response.json()
+    if use:
+        config.workspace = created.get("id")
+        config.save()
+
+    output.emit(
+        created,
+        lambda: console.print(
+            f"[green]✓[/green] Created [bold]{created.get('display_name')}[/bold] ({created.get('slug')})"
+            + ("  — now the current workspace" if use else "")
+        ),
+    )
+
+
+@app.command("delete")
+def delete_workspace(
+    name: str = typer.Argument(..., help="Workspace name, slug or ID"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask"),
+):
+    """
+    Delete a workspace and everything in it.
+
+    Example:
+        corerun ws delete scratch
+        corerun ws delete scratch --yes
+    """
+    import httpx
+
+    config = _require_credentials()
+
+    try:
+        workspaces = fetch(config.api_url, config.auth_token, config.verify_ssl)
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    target = resolve(workspaces, name)
+    if target is None:
+        console.print(f"[red]Error:[/red] no workspace called {name!r}")
+        console.print("  Run 'corerun ws list' to see the ones you belong to.")
+        raise typer.Exit(1)
+
+    if not yes:
+        # Named back before it is destroyed: a slug typed from memory is how
+        # the wrong workspace gets deleted.
+        typer.confirm(
+            f"Delete {label(target)} and everything in it? This cannot be undone.",
+            abort=True,
+        )
+
+    url = config.api_url.rstrip("/") + f"/workspaces/{target['id']}"
+    try:
+        response = httpx.delete(
+            url,
+            headers={"Authorization": f"Bearer {config.auth_token}"},
+            timeout=60.0,
+            verify=config.verify_ssl,
+        )
+    except httpx.ConnectError as e:
+        from corerun.exceptions import unreachable
+
+        raise unreachable(url, e) from e
+
+    if response.status_code not in (200, 204):
+        console.print(f"[red]Error:[/red] {_message(response)}")
+        raise typer.Exit(1)
+
+    # The CLI must not keep pointing at something that no longer exists.
+    if config.workspace == target["id"]:
+        config.workspace = None
+        config.save()
+
+    output.emit(
+        {"deleted": target["id"]},
+        lambda: console.print(f"[green]✓[/green] Deleted [bold]{label(target)}[/bold]"),
+    )
+
+
+def _slugify(name: str) -> str:
+    """Lowercase, dashes only — the same shape the console derives."""
+    import re
+
+    return re.sub(r"^-+|-+$", "", re.sub(r"[^a-z0-9]+", "-", name.lower()))
+
+
+def _message(response) -> str:
+    """The server's own words when it has any, the status line otherwise."""
+    try:
+        body = response.json()
+        return body.get("message") or body.get("error") or response.text
+    except Exception:
+        return f"{response.status_code} {response.text}"

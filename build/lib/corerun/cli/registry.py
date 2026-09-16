@@ -569,6 +569,62 @@ def _tenant_id(workspace: Optional[str]) -> str:
 # =============================================================================
 
 
+STAGES = ("none", "staging", "production", "archived")
+
+
+@app.command("stage")
+def set_stage(
+    name: str = typer.Argument(..., help="Model name"),
+    version: int = typer.Argument(..., help="Version to move"),
+    stage: str = typer.Argument(..., help=f"One of: {', '.join(STAGES)}"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask"),
+):
+    """
+    Move a version to a stage.
+
+    A stage says how far through its life a version is. An alias says which
+    version something should use. They are different questions: promoting to
+    production does not repoint @champion, and repointing @champion does not
+    promote anything.
+
+    Example:
+        corerun models stage my-model 5 staging
+        corerun models stage my-model 5 production
+        corerun models stage my-model 2 archived
+    """
+    if stage not in STAGES:
+        console.print(f"[red]Error:[/red] stage must be one of: {', '.join(STAGES)}")
+        raise typer.Exit(1)
+
+    _init_client()
+
+    import corerun.registry as registry
+
+    # Production is what live traffic gets. Asked about rather than done,
+    # because a wrong version here is not a wrong local file.
+    if stage == "production" and not yes:
+        current = ""
+        try:
+            for v in registry.list_versions(name, workspace=workspace):
+                if getattr(v, "stage", "") == "production":
+                    current = f" (replacing v{v.version})"
+                    break
+        except Exception:
+            pass
+        typer.confirm(
+            f"Move {name} v{version} to production{current}?",
+            abort=True,
+        )
+
+    try:
+        registry.set_version_stage(name, version, stage, workspace=workspace)
+        console.print(f"[green]{name} v{version} -> {stage}[/green]")
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+
 @app.command("alias")
 def set_alias(
     name: str = typer.Argument(..., help="Model name"),

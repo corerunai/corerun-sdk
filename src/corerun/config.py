@@ -13,7 +13,7 @@ The platform credential is last so that anything the user chose themselves —
 
 import ipaddress
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
@@ -117,6 +117,15 @@ class Config:
     # rather than trusting the value it started with.
     auth_token_file: Optional[Path] = None
 
+    # Settings this process took from the environment rather than from the file.
+    #
+    # They are not written back. Exporting CORERUN_API_URL to point one command
+    # at another deployment must not rewrite the file every later command reads
+    # -- that turns a temporary override into a permanent one, and the symptom
+    # shows up much later somewhere unrelated: a sign-in that opens the wrong
+    # host, long after the export was forgotten.
+    env_only: set = field(default_factory=set, repr=False, compare=False)
+
     @property
     def inference_base(self) -> str:
         """Where to call model endpoints: what was chosen, or what api_url implies.
@@ -202,19 +211,29 @@ class Config:
 
         path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Anything the environment supplied keeps whatever the file already
+        # said, so saving preserves the setting rather than overwriting it.
+        stored = Config.from_file(path) if path.exists() else Config()
+        api_url = stored.api_url if "api_url" in self.env_only else self.api_url
+        inference_url = stored.inference_url if "inference_url" in self.env_only else self.inference_url
+        timeout = stored.timeout if "timeout" in self.env_only else self.timeout
+        verify_ssl = stored.verify_ssl if "verify_ssl" in self.env_only else self.verify_ssl
+        auth_token = stored.auth_token if "auth_token" in self.env_only else self.auth_token
+        workspace = stored.workspace if "workspace" in self.env_only else self.workspace
+
         pending = path.with_name(path.name + ".new")
         with open(pending, "w") as f:
-            if self.auth_token:
-                f.write(f"auth_token={self.auth_token}\n")
+            if auth_token:
+                f.write(f"auth_token={auth_token}\n")
             if self.refresh_token:
                 f.write(f"refresh_token={self.refresh_token}\n")
-            if self.workspace:
-                f.write(f"workspace={self.workspace}\n")
-            f.write(f"api_url={self.api_url}\n")
-            if self.inference_url:
-                f.write(f"inference_url={self.inference_url}\n")
-            f.write(f"timeout={self.timeout}\n")
-            if not self.verify_ssl:
+            if workspace:
+                f.write(f"workspace={workspace}\n")
+            f.write(f"api_url={api_url}\n")
+            if inference_url:
+                f.write(f"inference_url={inference_url}\n")
+            f.write(f"timeout={timeout}\n")
+            if not verify_ssl:
                 f.write("verify_ssl=false\n")
 
         os.replace(pending, path)
@@ -320,16 +339,22 @@ def get_config() -> Config:
         env_config = Config.from_env()
         if env_config.auth_token:
             _config.auth_token = env_config.auth_token
+            _config.env_only.add("auth_token")
         if env_config.workspace:
             _config.workspace = env_config.workspace
+            _config.env_only.add("workspace")
         if os.getenv("CORERUN_API_URL"):
             _config.api_url = env_config.api_url
+            _config.env_only.add("api_url")
         if os.getenv("CORERUN_INFERENCE_URL"):
             _config.inference_url = env_config.inference_url
+            _config.env_only.add("inference_url")
         if os.getenv("CORERUN_TIMEOUT"):
             _config.timeout = env_config.timeout
+            _config.env_only.add("timeout")
         if os.getenv("CORERUN_VERIFY_SSL"):
             _config.verify_ssl = env_config.verify_ssl
+            _config.env_only.add("verify_ssl")
         _apply_platform_credential(_config)
     return _config
 

@@ -39,6 +39,7 @@ src/corerun/cli/datasets.py
 src/corerun/cli/endpoints.py
 src/corerun/cli/evaluate.py
 src/corerun/cli/finetune.py
+src/corerun/cli/groups.py
 src/corerun/cli/hosts.py
 src/corerun/cli/inference.py
 src/corerun/cli/jobs.py
@@ -49,6 +50,7 @@ src/corerun/cli/quota.py
 src/corerun/cli/registry.py
 src/corerun/cli/resolve.py
 src/corerun/cli/skills.py
+src/corerun/cli/storage.py
 src/corerun/cli/traces.py
 src/corerun/cli/workspace.py
 src/corerun/skills/README.md
@@ -59,11 +61,14 @@ src/corerun/skills/corerun-inference/SKILL.md
 src/corerun/skills/corerun-jobs/SKILL.md
 src/corerun/skills/corerun-models/SKILL.md
 src/corerun/skills/corerun-quota/SKILL.md
+src/corerun/skills/corerun-workspaces/SKILL.md
 tests/test_accelerator_cli.py
 tests/test_cluster_cli.py
+tests/test_config_env_overrides.py
 tests/test_credentials.py
 tests/test_dataset_splits.py
 tests/test_evaluate_exit_codes.py
 tests/test_host_cli.py
 tests/test_inference_recipe.py
+tests/test_skills_match_cli.py
 tests/test_token_refresh.py
