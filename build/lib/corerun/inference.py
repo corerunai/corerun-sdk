@@ -75,6 +75,19 @@ class InferenceServer(BaseModel):
     api_key: Optional[str] = None  # Only shown on create
     error: Optional[str] = None
     enable_tracing: bool = False
+
+    # What the engine was launched with. `corerun inference get` has printed
+    # these since it was written and the model never carried them, so reaching
+    # that line raised AttributeError -- which is every call, because a server
+    # deployed from a recipe always has engine args.
+    extra_args: List[str] = []
+    recipe_source: Optional[str] = None
+    recipe_note: Optional[str] = None
+    max_model_len: Optional[int] = None
+    tensor_parallel: Optional[int] = None
+    quantization: Optional[str] = None
+    accelerator_family: Optional[str] = None
+    accelerator_note: Optional[str] = None
     lora_modules: List[LoRAModuleInfo] = []  # LoRA adapters loaded on base model
     owner_id: str
     created_at: Optional[datetime] = None
