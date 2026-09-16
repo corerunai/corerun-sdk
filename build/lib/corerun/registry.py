@@ -89,6 +89,14 @@ class ModelVersion(BaseModel):
     status_message: str = ""
     progress: Dict[str, Any] = {}
 
+    # Publishing outward, which is a different question from whether the
+    # version exists here: a version is READY as soon as it is imported, and
+    # may or may not have been pushed to HuggingFace since.
+    publish_status: str = ""
+    publish_target: str = ""
+    publish_message: str = ""
+    publish_progress: Dict[str, Any] = {}
+
 
 class ModelAlias(BaseModel):
     """Model alias information."""
@@ -135,6 +143,10 @@ def _version_from_response(data: dict) -> ModelVersion:
         status=data.get("status", ""),
         status_message=data.get("status_message", ""),
         progress=data.get("progress") or {},
+        publish_status=data.get("publish_status", ""),
+        publish_target=data.get("publish_target", ""),
+        publish_message=data.get("publish_message", ""),
+        publish_progress=data.get("publish_progress") or {},
     )
 
 
@@ -521,6 +533,62 @@ def import_from_huggingface(
 
     return client.post(
         f"/registry/models/{name}/import-huggingface",
+        json=payload,
+        workspace=workspace,
+    )
+
+
+def publish_to_huggingface(
+    name: str,
+    huggingface_id: str,
+    hf_token: str,
+    version: Optional[int] = None,
+    private: bool = True,
+    message: Optional[str] = None,
+    workspace: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Publish a registry version to a HuggingFace repository.
+
+    The mirror of import_from_huggingface, and the transfer happens on the
+    platform for the same reason: the weights go straight from the workspace's
+    storage to HuggingFace without passing through whichever machine ran the
+    command.
+
+    Returns as soon as the push has started. Poll get_version and read
+    publish_status, which is PUBLISHING until it is PUBLISHED or FAILED.
+
+    Args:
+        name: Model in the registry to publish.
+        huggingface_id: Destination, as "org/repo". Created if it does not exist.
+        hf_token: A HuggingFace token with write access to that repository.
+        version: Which version; defaults to the latest.
+        private: Whether to create the repository private. Only consulted when
+            it has to be created -- an existing repository keeps its visibility.
+        message: Commit message. Defaults to naming the model and version.
+        workspace: Workspace ID (uses default if not specified)
+
+    Returns:
+        {"message", "model", "version", "huggingface_id", "url"}
+
+    Example:
+        started = corerun.registry.publish_to_huggingface(
+            "llama-3-8b-ft", "acme/llama-3-8b-ft", hf_token=token)
+        print(started["url"])
+    """
+    client = get_client()
+    payload: Dict[str, Any] = {
+        "huggingface_id": huggingface_id,
+        "hf_token": hf_token,
+        "private": private,
+    }
+    if version:
+        payload["version"] = version
+    if message:
+        payload["message"] = message
+
+    return client.post(
+        f"/registry/models/{name}/publish-huggingface",
         json=payload,
         workspace=workspace,
     )

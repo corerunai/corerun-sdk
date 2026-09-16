@@ -79,9 +79,25 @@ class CoreRunClient:
             return response.json()
 
         # Parse error response
+        #
+        # Two services answer here and they do not use the same shape. The
+        # Python data service returns FastAPI's {"detail": "..."}; the Go API
+        # returns {"error": "<code>", "message": "<what happened>"}, where the
+        # code is for programs and the message is for people. Reading `error`
+        # and never `message` meant every Go API failure reached the user as a
+        # bare "not_found" or "no_storage", with the sentence explaining it
+        # thrown away -- while the same command against the data service
+        # printed a full explanation.
+        #
+        # `error` stays as the last resort: a code says more than nothing.
         try:
             error_data = response.json()
-            detail = error_data.get("detail", error_data.get("error", str(error_data)))
+            detail = (
+                error_data.get("detail")
+                or error_data.get("message")
+                or error_data.get("error")
+                or str(error_data)
+            )
         except Exception:
             detail = response.text or f"HTTP {response.status_code}"
 

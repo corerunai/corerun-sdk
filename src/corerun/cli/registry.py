@@ -910,3 +910,102 @@ def _have(binary: str) -> bool:
     import shutil
 
     return shutil.which(binary) is not None
+
+
+@app.command("publish")
+def publish_model(
+    name: str = typer.Argument(..., help="Model in the registry to publish"),
+    to: str = typer.Option(..., "--to", help="Destination on HuggingFace, as org/repo"),
+    version: Optional[int] = typer.Option(None, "--version", "-v", help="Which version (default: the latest)"),
+    token: Optional[str] = typer.Option(None, "--token", help="HuggingFace write token (or set HF_TOKEN)"),
+    public: bool = typer.Option(False, "--public", help="Create the repository public rather than private"),
+    message: Optional[str] = typer.Option(None, "--message", "-m", help="Commit message"),
+    wait: bool = typer.Option(True, "--wait/--no-wait", help="Follow progress until the push finishes"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
+):
+    """
+    Publish a model version to a HuggingFace repository.
+
+    The other direction from 'import': what the registry holds goes out to
+    HuggingFace, weights and all. The push runs on the platform, so it does not
+    matter whether this machine could hold the model.
+
+    The repository is created if it is not there, private unless --public.
+    Publishing the same version twice changes nothing.
+
+        corerun models publish llama-3-8b-ft --to acme/llama-3-8b-ft
+    """
+    import os
+
+    import corerun.registry as registry
+
+    hf_token = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if not hf_token:
+        console.print("[red]Error:[/red] a HuggingFace write token is needed.")
+        console.print("  Pass --token, or set HF_TOKEN.")
+        raise typer.Exit(1)
+
+    if "/" not in to.strip("/"):
+        console.print(f"[red]Error:[/red] --to should be org/repo, not '{to}'.")
+        raise typer.Exit(1)
+
+    try:
+        started = registry.publish_to_huggingface(
+            name,
+            huggingface_id=to,
+            hf_token=hf_token,
+            version=version,
+            private=not public,
+            message=message,
+            workspace=workspace,
+        )
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(1)
+
+    published_version = started.get("version")
+    console.print(f"Publishing {name} v{published_version} to [bold]{to}[/bold]...")
+
+    if not wait:
+        console.print(f"  Follow it with: corerun models versions {name}")
+        return
+
+    _follow_publish(name, published_version, started.get("url", ""), workspace)
+
+
+def _follow_publish(model_name: str, version, url: str, workspace: Optional[str]) -> None:
+    """Show progress until the push finishes, or fails.
+
+    Progress is on the version rather than in the response, because the push
+    outlives the request that started it -- the same reason as the import.
+    """
+    import time
+
+    import corerun.registry as registry
+
+    last = ""
+    while True:
+        try:
+            v = registry.get_version(model_name, version, workspace=workspace)
+        except Exception as e:
+            console.print(f"[yellow]Lost track of the push:[/yellow] {e}")
+            raise typer.Exit(1)
+
+        status = (getattr(v, "publish_status", "") or "").upper()
+        progress = getattr(v, "publish_progress", None) or {}
+        stage = progress.get("stage_label") or progress.get("stage") or "Publishing"
+        percent = progress.get("percent")
+
+        line = f"  {stage}" + (f" {percent:.0f}%" if isinstance(percent, (int, float)) else "")
+        if line != last:
+            console.print(line, style="dim")
+            last = line
+
+        if status == "PUBLISHED":
+            console.print(f"[green]Published.[/green] {url or model_name}")
+            return
+        if status.startswith("FAILED"):
+            console.print(f"[red]Publish failed:[/red] {getattr(v, 'publish_message', '') or 'no reason given'}")
+            raise typer.Exit(1)
+
+        time.sleep(2)

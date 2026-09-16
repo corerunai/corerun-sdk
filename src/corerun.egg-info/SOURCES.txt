@@ -67,6 +67,7 @@ tests/test_cluster_cli.py
 tests/test_config_env_overrides.py
 tests/test_credentials.py
 tests/test_dataset_splits.py
+tests/test_error_messages.py
 tests/test_evaluate_exit_codes.py
 tests/test_host_cli.py
 tests/test_inference_recipe.py
