@@ -24,9 +24,9 @@ runner = CliRunner()
 BASE = "https://example.test/api/v1"
 
 GOOD_INSTALL = (
-    "curl -fsSL https://example.test/api/v1/connectors/install.sh | sudo bash"
+    "curl -fsSL https://example.test/api/v1/operators/install.sh | sudo bash"
 )
-CONNECT = "sudo corerun-host-connector connect --token ENROLL"
+CONNECT = "sudo corerun-host-operator connect --token ENROLL"
 
 
 @pytest.fixture
@@ -46,7 +46,7 @@ def wire(monkeypatch):
                 201,
                 json={
                     "name": body["name"],
-                    "backend": "host",
+                    "type": "host",
                     "architecture": body.get("architecture", "amd64"),
                     "os": body.get("os", "linux"),
                     "enrollment_token": "ENROLL",
@@ -67,14 +67,14 @@ def wire(monkeypatch):
     return state
 
 
-def test_adding_a_host_sends_backend_host_and_both_commands(wire):
+def test_adding_a_host_sends_type_host_and_both_commands(wire):
     result = runner.invoke(app, ["host", "add", "dgx1"])
     assert result.exit_code == 0, result.stderr
 
     body = json.loads(wire["seen"][0].content)
     assert body["name"] == "dgx1"
     # The one field that decides between a manifest and two commands.
-    assert body["backend"] == "host"
+    assert body["type"] == "host"
     assert body["workspace_scope"] is True
 
     # Both steps, in order, with the credential intact: a connect command
@@ -97,12 +97,12 @@ def test_an_install_command_with_no_address_is_reported_not_printed(wire):
     # guarding it can be satisfied by the download base alone. When only that
     # is set the command still comes back, minus its host -- and reads as
     # ordinary right up until somebody runs it.
-    wire["install"] = "curl -fsSL /connectors/install.sh | sudo bash"
+    wire["install"] = "curl -fsSL /operators/install.sh | sudo bash"
 
     result = runner.invoke(app, ["host", "add", "dgx1"])
     assert result.exit_code == 0, result.stderr
 
-    assert "curl -fsSL /connectors/install.sh" not in result.stdout
+    assert "curl -fsSL /operators/install.sh" not in result.stdout
     assert "CORERUN_PUBLIC_API_URL" in result.stdout
     # The connect command is built from the token and is unaffected, so it is
     # still worth giving.
@@ -148,3 +148,41 @@ def test_removing_a_tenant_wide_host_uses_the_tenants_route(wire):
     request = wire["seen"][0]
     assert request.method == "DELETE"
     assert request.url.path == "/api/v1/tenant/shared/clusters/dgx1"
+
+
+def test_a_host_can_declare_its_accelerator_family(wire):
+    """
+    A host can say what its cards are at enrollment, as a cluster can.
+
+    It matters more for a host than for a cluster. A cluster describes its
+    hardware through pod profiles; a bare machine has none, so this is the only
+    place it can say anything. Without it the platform falls back to what the
+    operator reports -- a machine's account of itself, which is exactly what
+    declaring a family exists to override.
+
+    The flag was missing for a while even though the API accepted the field on
+    the same endpoint the cluster path uses, so the gap was in the client only.
+    """
+    result = runner.invoke(
+        app, ["host", "add", "dgx1", "--accelerator-family", "nvidia/blackwell-rtx"]
+    )
+    assert result.exit_code == 0, result.stderr
+
+    body = json.loads(wire["seen"][0].content)
+    assert body["accelerator_family"] == "nvidia/blackwell-rtx"
+    assert body["type"] == "host"
+
+
+def test_an_undeclared_host_sends_no_family(wire):
+    """
+    Omitted means omitted, not empty.
+
+    An empty string would be a declaration of nothing, and the API keeps a
+    declared family apart from a detected one precisely so that a report never
+    overwrites what a person wrote. Sending "" would blur that.
+    """
+    result = runner.invoke(app, ["host", "add", "dgx1"])
+    assert result.exit_code == 0, result.stderr
+
+    body = json.loads(wire["seen"][0].content)
+    assert "accelerator_family" not in body

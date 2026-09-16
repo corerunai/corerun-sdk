@@ -2,7 +2,7 @@
 Bare-metal host CLI commands.
 
 A host is a cluster to everything downstream -- it registers under a cluster
-name and speaks the same connector protocol -- but it is not onboarded like one.
+name and speaks the same operator protocol -- but it is not onboarded like one.
 There is no Kubernetes to apply a manifest to, so it is set up by running two
 commands on the machine itself. That difference is the whole of why this is its
 own group rather than a flag on `clusters add`.
@@ -35,7 +35,7 @@ def _install_command_is_usable(command: str) -> bool:
 
     It is assembled from the platform's public API URL, and the check that
     guards it can be satisfied by the download base alone. When only that is
-    set, the API still succeeds and hands back `curl -fsSL /connectors/install.sh`
+    set, the API still succeeds and hands back `curl -fsSL /operators/install.sh`
     -- a command with no host in it, which reads as perfectly ordinary until
     somebody runs it. Printing it would be worse than saying nothing.
     """
@@ -49,6 +49,15 @@ def add_host(
         "amd64", "--architecture", "--arch", help="amd64 or arm64"
     ),
     os: str = typer.Option("linux", "--os", help="linux or darwin"),
+    accelerator_family: Optional[str] = typer.Option(
+        None,
+        "--accelerator-family",
+        "--gpu",
+        help="What this machine's cards are: a family (hopper) or a card "
+        "(h100). A host has no pod profiles, so this is the only place it can "
+        "declare its hardware -- left unset, it is identified from what its "
+        "operator reports. Check with 'corerun accelerators show <value>'.",
+    ),
     tenant_wide: bool = typer.Option(
         False,
         "--tenant-wide",
@@ -61,7 +70,7 @@ def add_host(
     Prepare a bare-metal machine so it can join.
 
     Two commands come back, and they run on the machine being added: the first
-    installs the connector (and Incus, if it is missing), the second joins it
+    installs the operator (and Incus, if it is missing), the second joins it
     with a one-time enrollment token.
 
     The token is a credential and is printed in full here, once. Running the
@@ -82,6 +91,7 @@ def add_host(
             name,
             architecture=architecture,
             os=os,
+            accelerator_family=accelerator_family,
             tenant_wide=tenant_wide,
             workspace=workspace,
         )
@@ -91,9 +101,9 @@ def add_host(
     def render():
         console.print(
             f"[green]Prepared[/green] {name} "
-            f"[dim](backend host, {enrollment.os}/{enrollment.architecture})[/dim]"
+            f"[dim](host, {enrollment.os}/{enrollment.architecture})[/dim]"
         )
-        console.print("\n[bold]1. On the machine, install the connector:[/bold]")
+        console.print("\n[bold]1. On the machine, install the operator:[/bold]")
         if _install_command_is_usable(enrollment.install_command):
             # soft_wrap: rich folds at the terminal width otherwise, and a
             # command that arrives folded pastes with a newline in the middle
@@ -106,8 +116,8 @@ def add_host(
                           "address in it.[/yellow]")
             console.print(
                 "     [dim]This deployment has no public API URL set, so the installer "
-                "does not know where to fetch the connector from. Set CORERUN_PUBLIC_API_URL "
-                "(or the 'connectors_download_url' platform setting) and prepare the host "
+                "does not know where to fetch the operator from. Set CORERUN_PUBLIC_API_URL "
+                "(or the 'operators_download_url' platform setting) and prepare the host "
                 "again. The connect command below is not affected.[/dim]"
             )
         console.print("\n[bold]2. Then join it:[/bold]")
@@ -137,9 +147,9 @@ def remove_host(
     """
     Remove a host from the platform.
 
-    This removes the record, not the software: the connector is still installed
+    This removes the record, not the software: the operator is still installed
     on the machine and will keep trying to connect until it is stopped there
-    (systemctl disable --now corerun-host-connector).
+    (systemctl disable --now corerun-host-operator).
 
     Example:
         corerun host rm dgx1
@@ -173,8 +183,8 @@ def remove_host(
     def render():
         console.print(f"[green]Removed[/green] {name}")
         console.print(
-            "[dim]Its connector is still installed. Stop it on the machine with "
-            "'systemctl disable --now corerun-host-connector'.[/dim]"
+            "[dim]Its operator is still installed. Stop it on the machine with "
+            "'systemctl disable --now corerun-host-operator'.[/dim]"
         )
 
     output.emit(result, render)

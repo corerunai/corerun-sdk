@@ -46,26 +46,26 @@ def wire(monkeypatch):
         path = request.url.path
         if path.endswith("/clusters/prepare"):
             body = json.loads(request.content)
-            if body.get("backend") == "host":
+            if body.get("type") == "host":
                 return httpx.Response(
                     201,
                     json={
                         "name": body["name"],
-                        "backend": "host",
+                        "type": "host",
                         "architecture": body.get("architecture", "amd64"),
                         "os": body.get("os", "linux"),
                         "enrollment_token": "ENROLL",
                         "install_command": (
                             "curl -fsSL "
-                            "https://example.test/api/v1/connectors/install.sh"
+                            "https://example.test/api/v1/operators/install.sh"
                             " | sudo bash"
                         ),
-                        "connect_command": "sudo corerun-host-connector connect --token ENROLL",
+                        "connect_command": "sudo corerun-host-operator connect --token ENROLL",
                         "note": "Run the install command first, then connect.",
                     },
                 )
             return httpx.Response(201, text=MANIFEST, headers={"Content-Type": "text/yaml"})
-        if path.endswith("/connector-manifest"):
+        if path.endswith("/operator-manifest"):
             return httpx.Response(200, text=MANIFEST, headers={"Content-Type": "text/yaml"})
         if path.endswith("/token"):
             return httpx.Response(200, json={"token": "NEW-TOKEN", "message": "Token regenerated"})
@@ -113,7 +113,7 @@ def test_adding_a_cluster_sends_the_fields_the_api_reads(wire):
 
     body = body_of(wire["seen"][0])
     assert body["name"] == "gpu1"
-    assert body["backend"] == "kubernetes"
+    assert body["type"] == "kubernetes"
     assert body["namespace"] == "agents"
     assert body["architecture"] == "arm64"
     assert body["accelerator_family"] == "h100"
@@ -170,7 +170,7 @@ def test_the_manifest_can_be_fetched_again(wire):
     result = runner.invoke(app, ["clusters", "manifest", "gpu1"])
     assert result.exit_code == 0, result.stderr
     assert result.stdout == MANIFEST
-    assert wire["seen"][0].url.path.endswith("/clusters/gpu1/connector-manifest")
+    assert wire["seen"][0].url.path.endswith("/clusters/gpu1/operator-manifest")
 
 
 def test_rotating_says_the_agent_will_drop_off(wire):

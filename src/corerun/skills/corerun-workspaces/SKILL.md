@@ -110,5 +110,5 @@ Check the scope before removing anything — removing a shared cluster takes it
 away from workspaces you are not looking at.
 
 `clusters add` and `hosts add` do not reach out to the machine. They hand back
-a manifest or an installer for somebody to run there, and the connector joins
+a manifest or an installer for somebody to run there, and the operator joins
 from its side. Nothing runs until it does.

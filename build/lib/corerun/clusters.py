@@ -2,11 +2,11 @@
 corerun clusters.
 
 The clusters a workspace can schedule onto, including live resource data
-reported by each connector -- and what it takes to add one.
+reported by each operator -- and what it takes to add one.
 
 A cluster is not created with a kubeconfig. It is *prepared*: a record is made
-with an connector credential, and the platform hands back something to apply on the
-target. Applying it makes the connector phone home and the cluster registers itself,
+with an operator credential, and the platform hands back something to apply on the
+target. Applying it makes the operator phone home and the cluster registers itself,
 which is why nothing here takes a cluster's address or its credentials.
 """
 
@@ -36,7 +36,7 @@ class StorageClassInfo(BaseModel):
 class ClusterResources(BaseModel):
     """Capacity discovered on a cluster, and how much of it is spoken for.
 
-    Present only while the cluster's connector is connected; a cluster that has
+    Present only while the cluster's operator is connected; a cluster that has
     never connected reports no resources at all.
     """
 
@@ -62,12 +62,14 @@ class Cluster(BaseModel):
 
     id: str = ""
     name: str = ""
-    backend: str = ""
+    # What this is: "kubernetes" or "host". Named type rather than backend
+    # because it says what the row is, not which driver runs its work.
+    type: str = ""
     namespace: str = ""
     status: str = ""
     scope: str = ""
     initialized: bool = False
-    connector_connected: bool = False
+    operator_connected: bool = False
     gpu_strategy: str = ""
     architecture: Optional[str] = None
     cluster_type: Optional[str] = None
@@ -77,7 +79,7 @@ class Cluster(BaseModel):
     @property
     def is_ready(self) -> bool:
         """Whether the cluster can accept work right now."""
-        return self.status == "ready" and self.connector_connected
+        return self.status == "ready" and self.operator_connected
 
     def __repr__(self) -> str:
         return f"<Cluster {self.name} ({self.status})>"
@@ -117,7 +119,7 @@ def get(name: str, workspace: Optional[str] = None) -> Cluster:
         workspace: Workspace ID (uses default if not specified)
 
     Returns:
-        Cluster object, including live resources when its connector is connected
+        Cluster object, including live resources when its operator is connected
 
     Example:
         c = corerun.clusters.get("gb10dgx01")
@@ -159,12 +161,12 @@ class HostEnrollment(BaseModel):
     """What a bare host needs in order to join.
 
     Both commands come from the API rather than being composed here: the install
-    one depends on where this deployment serves its connector binaries, which is a
+    one depends on where this deployment serves its operator binaries, which is a
     platform setting the client has no business guessing.
     """
 
     name: str = ""
-    backend: str = "host"
+    type: str = "host"
     architecture: str = ""
     os: str = ""
     enrollment_token: str = ""
@@ -216,25 +218,25 @@ def prepare(
     workspace: Optional[str] = None,
 ) -> str:
     """
-    Prepare a Kubernetes cluster for its connector, and return the manifest.
+    Prepare a Kubernetes cluster for its operator, and return the manifest.
 
     The cluster record is created here, but nothing is connected yet: what comes
-    back is a manifest to apply on the target cluster. Its connector connects to the
+    back is a manifest to apply on the target cluster. Its operator connects to the
     platform on its own, and the cluster becomes ready when it does.
 
     Args:
         name: Cluster name, unique within the tenant
-        namespace: Namespace to install the connector into
+        namespace: Namespace to install the operator into
         architecture: "amd64" or "arm64"
         accelerator_family: A family (hopper) or a card (h100). Anything
             unrecognised is not an error -- the cluster is simply left to be
-            identified from what its connector reports.
+            identified from what its operator reports.
         cluster_type_id: UUID of a cluster type from types()
         tenant_wide: Create it for the whole tenant rather than this workspace
         workspace: Workspace ID (uses default if not specified)
 
     Returns:
-        The connector manifest, as YAML
+        The operator manifest, as YAML
 
     Example:
         manifest = corerun.clusters.prepare("gpu1", accelerator_family="h100")
@@ -243,7 +245,7 @@ def prepare(
     client = get_client()
     body = {
         "name": name,
-        "backend": "kubernetes",
+        "type": "kubernetes",
         "namespace": namespace,
         "architecture": architecture,
         "workspace_scope": _scope(tenant_wide),
@@ -262,20 +264,26 @@ def prepare_host(
     name: str,
     architecture: str = "amd64",
     os: str = "linux",
+    accelerator_family: Optional[str] = None,
     tenant_wide: bool = False,
     workspace: Optional[str] = None,
 ) -> HostEnrollment:
     """
-    Prepare a bare-metal host for its connector, and return what it needs to join.
+    Prepare a bare-metal host for its operator, and return what it needs to join.
 
     A host has no Kubernetes to apply a manifest to, so it is onboarded by
-    running two commands on the machine itself: one installs the connector, and
+    running two commands on the machine itself: one installs the operator, and
     the second joins it with the enrollment token.
 
     Args:
         name: Cluster name, unique within the tenant
         architecture: "amd64" or "arm64". Forced to "arm64" for darwin.
         os: "linux" or "darwin"
+        accelerator_family: What this machine's cards are -- a family (hopper)
+            or a card (h100). A host has no pod profiles, so this is the only
+            place it can declare its hardware; left unset it is identified from
+            what its operator reports, which is a guess the machine makes about
+            itself.
         tenant_wide: Create it for the whole tenant rather than this workspace
         workspace: Workspace ID (uses default if not specified)
 
@@ -292,10 +300,11 @@ def prepare_host(
         "/clusters/prepare",
         json={
             "name": name,
-            "backend": "host",
+            "type": "host",
             "architecture": architecture,
             "os": os,
             "workspace_scope": _scope(tenant_wide),
+            **({"accelerator_family": accelerator_family} if accelerator_family else {}),
         },
         workspace=workspace,
     )
@@ -316,9 +325,9 @@ def remove(
 
     Args:
         name: Cluster name
-        clean_resources: Uninstall the connector's Helm release and RBAC
+        clean_resources: Uninstall the operator's Helm release and RBAC
         delete_namespace: Delete the Kubernetes namespace as well. Destructive,
-            and off by default: the namespace may hold more than the connector.
+            and off by default: the namespace may hold more than the operator.
         clean_kueue: Delete the cluster's Kueue queues and flavours
         clean_kai: Uninstall the KAI scheduler
         tenant_wide: Remove one the whole tenant owns. A workspace's route
@@ -354,7 +363,7 @@ def remove(
     )
 
 
-def connector_manifest(name: str, workspace: Optional[str] = None) -> str:
+def operator_manifest(name: str, workspace: Optional[str] = None) -> str:
     """
     The onboarding artefact for a cluster, as it stands now.
 
@@ -370,29 +379,29 @@ def connector_manifest(name: str, workspace: Optional[str] = None) -> str:
         The manifest or installer, as text
 
     Example:
-        print(corerun.clusters.connector_manifest("gpu1"))
+        print(corerun.clusters.operator_manifest("gpu1"))
     """
     client = get_client()
     return client.get(
-        f"/clusters/{name}/connector-manifest", workspace=workspace, response_type="text"
+        f"/clusters/{name}/operator-manifest", workspace=workspace, response_type="text"
     )
 
 
 def rotate_token(name: str, workspace: Optional[str] = None) -> str:
     """
-    Replace a cluster's connector token, and return the new one.
+    Replace a cluster's operator token, and return the new one.
 
     The previous token stops working immediately. There is no grace period and
-    no way for a connected connector to learn the replacement, so a cluster that is
+    no way for a connected operator to learn the replacement, so a cluster that is
     currently connected will drop off until it is given the new token. Re-apply
-    the manifest from connector_manifest() afterwards.
+    the manifest from operator_manifest() afterwards.
 
     Args:
         name: Cluster name
         workspace: Workspace ID (uses default if not specified)
 
     Returns:
-        The new connector token
+        The new operator token
 
     Example:
         corerun.clusters.rotate_token("gpu1")
@@ -404,9 +413,9 @@ def rotate_token(name: str, workspace: Optional[str] = None) -> str:
 
 def revoke_token(name: str, workspace: Optional[str] = None) -> None:
     """
-    Clear a cluster's connector token, so its connector can no longer connect.
+    Clear a cluster's operator token, so its operator can no longer connect.
 
-    Note that a token the connector has *already* been given as a replacement -- by
+    Note that a token the operator has *already* been given as a replacement -- by
     a cluster that re-onboarded, say -- is not cleared by this, and the hub will
     still honour it. This stops the cluster's current credential, not every
     credential that has ever been valid.

@@ -84,12 +84,12 @@ def list_clusters(
     table.add_column("Backend")
     table.add_column("Scope")
     table.add_column("Status")
-    table.add_column("Connector")
+    table.add_column("Operator")
     table.add_column("Nodes", justify="right")
     table.add_column("GPUs", justify="right")
 
     for c in items:
-        connector = "[green]connected[/]" if c.connector_connected else "[dim]offline[/]"
+        operator = "[green]connected[/]" if c.operator_connected else "[dim]offline[/]"
         nodes = str(c.resources.node_count) if c.resources else "-"
         if c.resources and c.resources.total_gpus:
             gpus = f"{c.resources.allocated_gpus}/{c.resources.total_gpus}"
@@ -97,10 +97,10 @@ def list_clusters(
             gpus = "-"
         table.add_row(
             c.name,
-            c.backend or "-",
+            c.type or "-",
             c.scope or "-",
             f"[{_status_style(c.status)}]{c.status}[/]",
-            connector,
+            operator,
             nodes,
             gpus,
         )
@@ -138,15 +138,15 @@ def get_cluster(
 
     console.print(f"\n[bold cyan]{c.name}[/]")
     console.print(f"  Status:       [{_status_style(c.status)}]{c.status}[/]")
-    console.print(f"  Backend:      {c.backend or '-'}")
+    console.print(f"  Type:         {c.type or '-'}")
     console.print(f"  Namespace:    {c.namespace or '-'}")
     console.print(f"  Scope:        {c.scope or '-'}")
     console.print(f"  Architecture: {c.architecture or '-'}")
     console.print(f"  GPU strategy: {c.gpu_strategy or '-'}")
-    console.print(f"  Connector:    {'connected' if c.connector_connected else 'offline'}")
+    console.print(f"  Operator:    {'connected' if c.operator_connected else 'offline'}")
 
     if not c.resources:
-        console.print("\n[dim]No resource data — the connector has not reported in.[/]")
+        console.print("\n[dim]No resource data — the operator has not reported in.[/]")
         return
 
     r = c.resources
@@ -269,7 +269,7 @@ def list_types(
 def add_cluster(
     name: str = typer.Argument(..., metavar="NAME", help="Cluster name, e.g. gpu1"),
     namespace: str = typer.Option(
-        "corerun", "--namespace", "-n", help="Namespace to install the connector into"
+        "corerun", "--namespace", "-n", help="Namespace to install the operator into"
     ),
     architecture: str = typer.Option(
         "amd64", "--architecture", "--arch", help="amd64 or arm64"
@@ -280,7 +280,7 @@ def add_cluster(
         "--gpu",
         help="What this cluster's cards are: a family (hopper) or a card (h100). "
         "Anything unrecognised is not refused -- the cluster is left to be "
-        "identified from what its connector reports. Check with "
+        "identified from what its operator reports. Check with "
         "'corerun accelerators show <value>'.",
     ),
     cluster_type: Optional[str] = typer.Option(
@@ -295,11 +295,11 @@ def add_cluster(
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
 ):
     """
-    Prepare a Kubernetes cluster so its connector can join.
+    Prepare a Kubernetes cluster so its operator can join.
 
     Nothing connects here. This writes the cluster's manifest to stdout and what
     to do with it to stderr, so `corerun cluster add gpu1 > cluster.yaml` leaves
-    a file you can apply. Apply it on the target and the cluster's connector phones
+    a file you can apply. Apply it on the target and the cluster's operator phones
     home on its own -- `corerun clusters list` shows when it has.
 
     Adding a host instead? `corerun host add` -- a bare machine has no
@@ -331,14 +331,14 @@ def add_cluster(
         # Everything a person reads goes to stderr, so it cannot end up in the
         # file somebody redirected.
         output.errors.print(
-            f"\n[green]Prepared[/green] {name} [dim](backend kubernetes)[/dim]\n"
+            f"\n[green]Prepared[/green] {name} [dim](kubernetes)[/dim]\n"
             "Apply it on the cluster:\n"
             "  [bold]kubectl apply -f -[/bold]   [dim](or the file you saved)[/dim]\n"
-            "[dim]It registers itself once its connector connects. Watch for it with "
+            "[dim]It registers itself once its operator connects. Watch for it with "
             "'corerun clusters list'.[/dim]"
         )
 
-    output.emit({"name": name, "backend": "kubernetes", "manifest": manifest}, render)
+    output.emit({"name": name, "type": "kubernetes", "manifest": manifest}, render)
 
 
 @app.command("manifest")
@@ -363,14 +363,14 @@ def cluster_manifest(
     import corerun.clusters as clusters
 
     try:
-        document = clusters.connector_manifest(name, workspace=workspace)
+        document = clusters.operator_manifest(name, workspace=workspace)
     except Exception as e:
         raise output.fail(str(e))
 
     def render():
         _write_document(document)
         output.errors.print(
-            f"\n[dim]This carries {name}'s current connector token. Its connector is "
+            f"\n[dim]This carries {name}'s current operator token. Its operator is "
             "already using it, so applying this again on a connected cluster "
             "changes nothing.[/dim]"
         )
@@ -385,7 +385,7 @@ def remove_cluster(
         False,
         "--delete-namespace",
         help="Delete the namespace too. Destructive, and off by default: the "
-        "namespace may hold more than this connector.",
+        "namespace may hold more than this operator.",
     ),
     clean_kueue: bool = typer.Option(
         False, "--clean-kueue", help="Delete the cluster's Kueue queues and flavours"
@@ -403,7 +403,7 @@ def remove_cluster(
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
 ):
     """
-    Remove a cluster and tear down what its connector installed.
+    Remove a cluster and tear down what its operator installed.
 
     The Helm release and RBAC are uninstalled by default. Nothing checks for
     running workloads first, so a cluster with jobs on it is removed with its
@@ -415,7 +415,7 @@ def remove_cluster(
     _init_client()
 
     if not yes and not output.json_mode():
-        typer.confirm(f"Remove the cluster '{name}' and its connector's resources?", abort=True)
+        typer.confirm(f"Remove the cluster '{name}' and its operator's resources?", abort=True)
 
     import corerun.clusters as clusters
 
@@ -447,7 +447,7 @@ def remove_cluster(
     output.emit(result, render)
 
 
-token_app = typer.Typer(help="The credential a cluster's connector connects with")
+token_app = typer.Typer(help="The credential a cluster's operator connects with")
 app.add_typer(token_app, name="token")
 
 
@@ -458,9 +458,9 @@ def rotate_token(
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
 ):
     """
-    Replace a cluster's connector token.
+    Replace a cluster's operator token.
 
-    The old token stops working the moment this returns, and a connected connector
+    The old token stops working the moment this returns, and a connected operator
     has no way to learn the new one -- so a cluster that is connected right now
     will drop off until it is given the replacement. It does not come back on
     its own.
@@ -475,7 +475,7 @@ def rotate_token(
 
     if not yes and not output.json_mode():
         typer.confirm(
-            f"Rotate {name}'s token? A connected connector will drop off until it is "
+            f"Rotate {name}'s token? A connected operator will drop off until it is "
             "given the new one",
             abort=True,
         )
@@ -491,7 +491,7 @@ def rotate_token(
         console.print(f"[green]New token[/green] for {name}")
         console.print(f"  {token}")
         output.errors.print(
-            "[dim]The connector holding the previous one cannot reconnect. Re-apply "
+            "[dim]The operator holding the previous one cannot reconnect. Re-apply "
             f"the manifest to restore it: corerun clusters manifest {name}[/dim]"
         )
 
@@ -505,11 +505,11 @@ def revoke_token(
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace ID"),
 ):
     """
-    Clear a cluster's connector token, so its connector can no longer connect.
+    Clear a cluster's operator token, so its operator can no longer connect.
 
     This stops the credential the cluster currently holds. A replacement token
-    its connector was already handed is not cleared, and the hub will still honour
-    it -- so this is not a way to cut off an connector you have lost track of.
+    its operator was already handed is not cleared, and the hub will still honour
+    it -- so this is not a way to cut off an operator you have lost track of.
 
     Example:
         corerun clusters token revoke gpu1
@@ -518,7 +518,7 @@ def revoke_token(
 
     if not yes and not output.json_mode():
         typer.confirm(
-            f"Revoke {name}'s connector token? Its connector will be locked out",
+            f"Revoke {name}'s operator token? Its operator will be locked out",
             abort=True,
         )
 
@@ -532,7 +532,7 @@ def revoke_token(
     result = {"name": name, "message": "Token revoked"}
 
     def render():
-        console.print(f"[green]Revoked[/green] the connector token for {name}")
+        console.print(f"[green]Revoked[/green] the operator token for {name}")
         output.errors.print(
             "[dim]Give it a new one with 'corerun clusters token rotate', then "
             "re-apply the manifest.[/dim]"
