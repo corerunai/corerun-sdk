@@ -40,13 +40,35 @@ Usage:
 """
 
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from datetime import datetime
 
 from corerun.config import get_client
 
 
-class RegisteredModel(BaseModel):
+class _NullTolerant(BaseModel):
+    """A model whose absent collections arrive as null rather than empty.
+
+    Go marshals a nil map and a nil slice to `null`, not to `{}` or `[]`, so a
+    model with no tags and a version with no metadata come back with null in
+    those fields. Pydantic rejects null for a non-optional dict, which made
+    `corerun models push` fail on its first call for any model created without
+    tags -- before it had uploaded anything, with a validation error naming a
+    field the user never set.
+    """
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _null_is_the_default(cls, value, info):
+        if value is not None:
+            return value
+        field = cls.model_fields.get(info.field_name)
+        if field is None or field.is_required():
+            return value
+        return field.get_default(call_default_factory=True)
+
+
+class RegisteredModel(_NullTolerant):
     """Registered model information."""
     name: str
     description: Optional[str] = None
@@ -58,7 +80,7 @@ class RegisteredModel(BaseModel):
     updated_at: Optional[datetime] = None
 
 
-class ModelVersion(BaseModel):
+class ModelVersion(_NullTolerant):
     """Model version information."""
     model_name: str
     version: int
