@@ -71,6 +71,7 @@ tests/test_error_messages.py
 tests/test_evaluate_exit_codes.py
 tests/test_host_cli.py
 tests/test_inference_recipe.py
+tests/test_lfs_presigned.py
 tests/test_null_collections.py
 tests/test_skills_match_cli.py
 tests/test_tenant_resolution.py

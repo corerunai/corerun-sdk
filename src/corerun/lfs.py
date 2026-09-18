@@ -162,6 +162,7 @@ def _presigned(href: str) -> bool:
         "x-amz-signature" in query  # S3 and compatibles, SigV4
         or "x-goog-signature" in query  # Google Cloud Storage, V4
         or {"signature", "awsaccesskeyid"} <= query  # S3, the older SigV2
+        or {"signature", "key-pair-id"} <= query  # CloudFront, and HuggingFace
         or {"sig", "sv"} <= query  # Azure blob SAS
     )
 
