@@ -15,10 +15,6 @@ Usage:
     corerun models stage my-model 1 production
     corerun models alias my-model champion 1
     corerun models predict my-model input.json --alias champion
-    corerun prompts list
-    corerun prompts get my-prompt --alias production
-    corerun prompts create my-prompt --template "Hello {{name}}"
-    corerun prompts alias my-prompt production 2
     corerun traces list
     corerun traces get <trace-id>
     corerun finetune list
@@ -57,7 +53,6 @@ from corerun.cli.hosts import app as hosts_app
 from corerun.cli.inference import app as inference_app
 from corerun.cli.jobs import app as jobs_app
 from corerun.cli.notebooks import app as notebooks_app
-from corerun.cli.prompts import app as prompts_app
 from corerun.cli.quota import app as quota_app
 from corerun.cli.registry import app as registry_app
 from corerun.cli.skills import app as skills_app
@@ -99,7 +94,6 @@ app.add_typer(datasets_app, name="datasets", help="Dataset management")
 app.add_typer(jobs_app, name="jobs", help="Job management")
 app.add_typer(notebooks_app, name="notebooks", help="Notebook sessions")
 app.add_typer(registry_app, name="models", help="Model registry")
-app.add_typer(prompts_app, name="prompts", help="Prompt registry")
 app.add_typer(skills_app, name="skills", help="corerun skills for coding agents")
 app.add_typer(traces_app, name="traces", help="Trace management")
 app.add_typer(finetune_app, name="finetune", help="Fine-tuning jobs")

@@ -248,7 +248,7 @@ def show_workspace():
 
 # The capability keys the platform recognises, in the order the console lists
 # them. Kept here rather than fetched so `--help` can name them offline.
-CAPABILITIES = ("notebooks", "training", "models", "prompts", "datasets", "images", "endpoints")
+CAPABILITIES = ("notebooks", "training", "models", "datasets", "images", "endpoints")
 
 
 @app.command("create")

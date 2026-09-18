@@ -33,7 +33,7 @@ corerun ws create "Scratch" --use
 The slug is derived from the name when omitted. `--use` makes it the workspace
 this CLI acts in, which saves a `set` afterwards.
 
-`--capabilities` is a subset of `notebooks, training, models, prompts,
+`--capabilities` is a subset of `notebooks, training, models,
 datasets, images, endpoints`; omitting it means all of them. It decides what
 the console shows and what the workspace is for — a serving-only workspace
 asking for `endpoints` is clearer than one that offers training nobody will

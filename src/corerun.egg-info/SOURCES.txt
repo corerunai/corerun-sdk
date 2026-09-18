@@ -19,7 +19,6 @@ src/corerun/jobs.py
 src/corerun/lfs.py
 src/corerun/models.py
 src/corerun/notebooks.py
-src/corerun/prompts.py
 src/corerun/pull.py
 src/corerun/quota.py
 src/corerun/registry.py
@@ -45,7 +44,6 @@ src/corerun/cli/inference.py
 src/corerun/cli/jobs.py
 src/corerun/cli/notebooks.py
 src/corerun/cli/output.py
-src/corerun/cli/prompts.py
 src/corerun/cli/quota.py
 src/corerun/cli/registry.py
 src/corerun/cli/resolve.py

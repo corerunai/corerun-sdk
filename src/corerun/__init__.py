@@ -51,28 +51,6 @@ Model Registry:
     #   corerun models push my-model ./checkpoint
     #   corerun models pull my-model
 
-Prompt Registry:
-    import corerun
-    from corerun import prompts
-
-    corerun.init()
-
-    # Load a prompt by alias
-    prompt = prompts.load("summarization-prompt", alias="production")
-    messages = prompt.render(document="...", focus_areas="key points")
-
-    # List prompts
-    all_prompts = prompts.list()
-
-    # Create a prompt
-    prompts.create(
-        name="my-prompt",
-        messages=[
-            {"role": "system", "content": "You are helpful."},
-            {"role": "user", "content": "{{question}}"},
-        ],
-    )
-
 Notebooks:
     import corerun
 
@@ -143,7 +121,6 @@ from corerun import (
     inference,
     jobs,
     notebooks,
-    prompts,
     quota,
     registry,
 )
@@ -159,7 +136,6 @@ __all__ = [
     "datasets",
     "jobs",
     "registry",
-    "prompts",
     "notebooks",
     "endpoints",
     "inference",
