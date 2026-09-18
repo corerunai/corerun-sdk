@@ -11,9 +11,9 @@ src/corerun/credentials.py
 src/corerun/datasets.py
 src/corerun/device_auth.py
 src/corerun/endpoints.py
-src/corerun/evaluations.py
 src/corerun/exceptions.py
 src/corerun/finetune.py
+src/corerun/genai.py
 src/corerun/inference.py
 src/corerun/jobs.py
 src/corerun/lfs.py
@@ -36,8 +36,8 @@ src/corerun/cli/clusters.py
 src/corerun/cli/compute.py
 src/corerun/cli/datasets.py
 src/corerun/cli/endpoints.py
-src/corerun/cli/evaluate.py
 src/corerun/cli/finetune.py
+src/corerun/cli/genai.py
 src/corerun/cli/groups.py
 src/corerun/cli/hosts.py
 src/corerun/cli/inference.py
@@ -66,7 +66,7 @@ tests/test_config_env_overrides.py
 tests/test_credentials.py
 tests/test_dataset_splits.py
 tests/test_error_messages.py
-tests/test_evaluate_exit_codes.py
+tests/test_genai.py
 tests/test_host_cli.py
 tests/test_inference_recipe.py
 tests/test_lfs_presigned.py

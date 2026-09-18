@@ -16,15 +16,12 @@ Usage:
     corerun models alias my-model champion 1
     corerun models predict my-model input.json --alias champion
     corerun traces list
+    corerun genai traces list --state ERROR
+    corerun genai sessions list
     corerun traces get <trace-id>
     corerun finetune list
     corerun finetune create --name my-ft --framework unsloth --model meta-llama/Llama-3.2-3B-Instruct --dataset <id> --compute dgx
     corerun finetune wait <job-id>
-    corerun evaluate scorers
-    corerun evaluate datasets list
-    corerun evaluate datasets create --name qa-bench --schema schema.json --examples data.json
-    corerun evaluate runs list
-    corerun evaluate runs create --name my-eval --dataset <id> --model mistral-7b --endpoint <server-id> --scorers correctness,fluency --compute dgx --wait
     corerun inference list
     corerun inference deploy --name mistral --model mistralai/Mistral-7B --compute dgx --gpu 1
     corerun inference scale <server-id> --min-replicas 2 --max-replicas 4
@@ -47,7 +44,7 @@ from corerun.cli.clusters import app as clusters_app
 from corerun.cli.compute import app as compute_app
 from corerun.cli.datasets import app as datasets_app
 from corerun.cli.endpoints import app as endpoints_app
-from corerun.cli.evaluate import app as evaluate_app
+from corerun.cli.genai import app as genai_app
 from corerun.cli.finetune import app as finetune_app
 from corerun.cli.hosts import app as hosts_app
 from corerun.cli.inference import app as inference_app
@@ -97,7 +94,7 @@ app.add_typer(registry_app, name="models", help="Model registry")
 app.add_typer(skills_app, name="skills", help="corerun skills for coding agents")
 app.add_typer(traces_app, name="traces", help="Trace management")
 app.add_typer(finetune_app, name="finetune", help="Fine-tuning jobs")
-app.add_typer(evaluate_app, name="evaluate", help="LLM evaluations")
+app.add_typer(genai_app, name="genai", help="Agent traces, sessions and retention")
 app.add_typer(inference_app, name="inference", help="Inference servers")
 app.add_typer(endpoints_app, name="endpoints", help="Model endpoints")
 app.add_typer(catalogue_app, name="catalogue", help="Models available from the catalogue")
@@ -118,7 +115,6 @@ app.add_typer(registry_app, name="registry", hidden=True)
 # and is what people type; both names reach the same commands.
 app.add_typer(registry_app, name="model", hidden=True)
 app.add_typer(finetune_app, name="ft", hidden=True)
-app.add_typer(evaluate_app, name="eval", hidden=True)
 app.add_typer(inference_app, name="serve", hidden=True)
 app.add_typer(clusters_app, name="cluster", hidden=True)
 # `host` is what people type and what the docs say; the group is plural
