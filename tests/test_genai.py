@@ -7,6 +7,8 @@ the filter names, and on the shape of a reply -- and a disagreement about any
 of those reads as "no traces" rather than as a bug.
 """
 
+import re
+
 import httpx
 import pytest
 from typer.testing import CliRunner
@@ -197,3 +199,103 @@ def test_a_failure_is_reported_in_json_mode_too(wire):
     result = runner.invoke(app, ["--json", "genai", "traces", "get", "0" * 32])
     assert result.exit_code == 1
     assert '"error"' in result.output
+
+
+def test_the_id_the_table_prints_is_one_get_accepts(wire):
+    """Whatever the table prints must work when pasted back.
+
+    It printed sixteen characters and `get` demanded thirty-two, so copying an
+    id out of the listing answered "no trace with that id". Either the column
+    prints the whole thing or a prefix resolves; this pins the round trip
+    rather than the width, so both remain valid ways to keep it true.
+    """
+    listing = runner.invoke(app, ["genai", "traces", "list"])
+    assert listing.exit_code == 0, listing.output
+
+    # The id as a reader would copy it: the longest unbroken run of hex in the
+    # Trace column.
+    shown = max(re.findall(r"[0-9a-f]{8,}", listing.output), key=len)
+    assert TRACE["trace_id"].startswith(shown)
+
+    wire["seen"].clear()
+    fetched = runner.invoke(app, ["genai", "traces", "get", shown])
+    assert fetched.exit_code == 0, fetched.output
+    assert wire["seen"][-1].url.path == f"/api/v1/genai/traces/{TRACE['trace_id']}"
+
+
+def test_a_unique_prefix_resolves_to_the_whole_id(wire):
+    """Every screen shortens an id, so a reader is always holding a prefix."""
+    result = runner.invoke(app, ["genai", "traces", "get", TRACE["trace_id"][:12]])
+    assert result.exit_code == 0, result.output
+    # The listing is asked for that prefix, then the full id is fetched.
+    assert wire["seen"][0].url.path == "/api/v1/genai/traces"
+    assert dict(wire["seen"][0].url.params)["search"] == TRACE["trace_id"][:12]
+    assert wire["seen"][1].url.path == f"/api/v1/genai/traces/{TRACE['trace_id']}"
+
+
+def test_a_full_id_is_not_looked_up_first(wire):
+    """A whole id costs no extra request."""
+    runner.invoke(app, ["genai", "traces", "get", TRACE["trace_id"]])
+    assert len(wire["seen"]) == 1
+    assert wire["seen"][0].url.path == f"/api/v1/genai/traces/{TRACE['trace_id']}"
+
+
+def test_an_ambiguous_prefix_says_so_rather_than_picking(wire):
+    wire["respond"] = lambda r: httpx.Response(200, json={"traces": [
+        {**TRACE, "trace_id": "abc" + "0" * 29},
+        {**TRACE, "trace_id": "abc" + "1" * 29},
+    ]})
+    result = runner.invoke(app, ["genai", "traces", "get", "abc"])
+    assert result.exit_code == 1
+    assert "names 2 traces" in result.output
+
+
+def test_a_prefix_matching_nothing_says_which_prefix(wire):
+    wire["respond"] = lambda r: httpx.Response(200, json={"traces": []})
+    result = runner.invoke(app, ["genai", "traces", "get", "zzzz"])
+    assert result.exit_code == 1
+    assert "zzzz" in result.output
+
+
+def test_the_tree_draws_guides_and_a_bar_per_span(wire):
+    """The shape of the call is the point, not a list of names."""
+    result = runner.invoke(app, ["genai", "traces", "get", TRACE["trace_id"]])
+    assert result.exit_code == 0, result.output
+    assert "├─" in result.output or "└─" in result.output
+    assert "█" in result.output
+
+
+def test_a_root_child_is_not_indented_under_a_guide_that_was_not_drawn(wire):
+    """A root draws no joint, so its children start at the left edge.
+
+    They inherited three columns of padding from a guide that was never
+    printed, which read as the whole tree hanging off nothing.
+    """
+    result = runner.invoke(app, ["genai", "traces", "get", TRACE["trace_id"]])
+    joints = [l for l in result.output.splitlines() if l.lstrip().startswith(("├─", "└─"))]
+    assert joints, result.output
+    # Every line opens with a one-character column that carries "!" for a
+    # failed span, so the first joint sits immediately after it -- not three
+    # columns further in, which is what inheriting an undrawn guide looked
+    # like.
+    first = joints[0]
+    at = min(i for i in (first.find("├─"), first.find("└─")) if i >= 0)
+    assert at <= 1, repr(first)
+
+
+def test_a_span_too_short_to_fill_a_cell_is_still_drawn(wire):
+    """A 0ms span happened. Rounding it away would hide a step."""
+    from corerun.cli.genai import _bar
+
+    drawn = _bar(0.5, 0.5, 20)
+    assert drawn.strip() != ""
+
+
+def test_a_bar_sits_where_the_span_ran_not_at_the_left(wire):
+    """Position carries as much as length: overlap is the question a slow
+    trace raises, and every bar starting at zero cannot answer it."""
+    from corerun.cli.genai import _bar
+
+    late = _bar(0.5, 1.0, 20)
+    assert late.startswith(" ")
+    assert late.index("█") >= 9
