@@ -20,8 +20,13 @@ corerun compute list                         # valid --compute values
 corerun inference deploy --name <name> --model <model-id> --compute <target> --gpu 1
 ```
 
-Useful flags: `--type vllm|sglang|ollama`, `--source huggingface|registry|mlflow|path`,
+Useful flags: `--type vllm|sglang|ollama`, `--source huggingface|registry|catalog|path`,
 `--quantization awq|gptq|fp8`, `--tensor-parallel N`, `--max-model-len N`, `--wait`.
+
+Those four are what vLLM serves. A Triton deployment additionally accepts
+artifacts fetched from a tracking server; vLLM does not, and asking for that on
+a language model is refused before anything is deployed rather than failing
+later inside the container.
 
 `--endpoint <name>` puts the server behind an existing address instead of
 creating one named after the deployment, and `--served-name` sets what callers

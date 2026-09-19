@@ -55,6 +55,7 @@ src/corerun/skills/README.md
 src/corerun/skills/corerun-datasets/SKILL.md
 src/corerun/skills/corerun-endpoints/SKILL.md
 src/corerun/skills/corerun-finetune/SKILL.md
+src/corerun/skills/corerun-genai/SKILL.md
 src/corerun/skills/corerun-inference/SKILL.md
 src/corerun/skills/corerun-jobs/SKILL.md
 src/corerun/skills/corerun-models/SKILL.md
