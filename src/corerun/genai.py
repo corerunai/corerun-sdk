@@ -70,7 +70,7 @@ _UNITS = {"ms": 1.0, "s": 1000.0, "m": 60_000.0, "h": 3_600_000.0}
 
 
 def _duration_ms(formatted: Optional[str]) -> Optional[float]:
-    """"2.400s" or "1m 3s" as a number.
+    """ "2.400s" or "1m 3s" as a number.
 
     The engine formats this for display. Unparseable reads as absent rather
     than as zero: a trace of unknown duration is not one that took no time.
@@ -236,6 +236,61 @@ class Session:
 
 
 @dataclass
+class EvaluationRun:
+    """One scoring pass over a dataset.
+
+    The engine has no evaluation-run entity: a run carrying scores is an
+    evaluation run and one that does not is a training run, and they live in
+    the same table. So the scores are the substance here.
+    """
+
+    run_id: str
+    name: str
+    status: str
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    duration_ms: Optional[float] = None
+    dataset: Optional[str] = None
+    metrics: Dict[str, float] = field(default_factory=dict)
+    params: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def failed(self) -> bool:
+        return self.status == "FAILED"
+
+
+@dataclass
+class ReviewQueue:
+    """Traces somebody has been asked to look at.
+
+    A USER queue is a person's own list, made on demand, one per person per
+    experiment. A CUSTOM queue is one somebody created and assigned.
+    """
+
+    queue_id: str
+    experiment_id: str
+    name: str
+    queue_type: str = "CUSTOM"
+    created_by: Optional[str] = None
+    users: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ReviewItem:
+    """One trace in a queue, and what was decided about it."""
+
+    queue_id: str
+    item_id: str
+    status: str
+    item_type: str = "TRACE"
+    completed_by: Optional[str] = None
+
+    @property
+    def pending(self) -> bool:
+        return self.status == "PENDING"
+
+
+@dataclass
 class Judge:
     """A scorer registered against an experiment."""
 
@@ -252,6 +307,16 @@ def _when(iso: Optional[str]) -> Optional[datetime]:
     try:
         return datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except ValueError:
+        return None
+
+
+def _epoch(ms: Any) -> Optional[datetime]:
+    """Epoch milliseconds as a datetime. Runs are timed in millis, not nanos."""
+    if not ms:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -455,9 +520,7 @@ def trace(trace_id: str, *, workspace: Optional[str] = None) -> TraceDetail:
     )
 
 
-def delete_traces(
-    trace_ids: List[str], *, experiment: str, workspace: Optional[str] = None
-) -> int:
+def delete_traces(trace_ids: List[str], *, experiment: str, workspace: Optional[str] = None) -> int:
     """Delete traces, and say how many went.
 
     `request_ids`, though the engine's own error for leaving it out asks for
@@ -537,6 +600,157 @@ def judges(*, experiment: str, workspace: Optional[str] = None) -> List[Judge]:
         )
         for raw in payload.get("scorers", []) or []
     ]
+
+
+def evaluation_runs(
+    *, experiment: str, limit: int = 200, workspace: Optional[str] = None
+) -> List[EvaluationRun]:
+    """The evaluation runs in an experiment, newest first.
+
+    Version 2 of that endpoint because there is no version 3 -- it answers 404
+    where every other route here has a newer spelling.
+    """
+    payload = get_client().post(
+        f"{_V2}/runs/search",
+        json={
+            "experiment_ids": [experiment],
+            "max_results": limit,
+            "order_by": ["attributes.start_time DESC"],
+            # Deleted runs sit in the same table under a lifecycle stage, and
+            # asking for everything lists runs somebody already threw away.
+            "run_view_type": "ACTIVE_ONLY",
+        },
+        workspace=workspace,
+    )
+
+    out = []
+    for raw in payload.get("runs", []) or []:
+        info = raw.get("info") or {}
+        data = raw.get("data") or {}
+        tags = {t["key"]: t.get("value", "") for t in data.get("tags", []) or []}
+        dataset = ((raw.get("inputs") or {}).get("dataset_inputs") or [{}])[0].get("dataset") or {}
+        start, end = info.get("start_time"), info.get("end_time")
+        out.append(
+            EvaluationRun(
+                run_id=info.get("run_id") or info.get("run_uuid", ""),
+                name=tags.get("mlflow.runName") or info.get("run_name") or "(unnamed)",
+                status=info.get("status", "UNKNOWN"),
+                start_time=_epoch(start),
+                end_time=_epoch(end),
+                # Absent rather than zero while a run is still going: one that
+                # has not finished has no duration.
+                duration_ms=(end - start) if start and end and end > start else None,
+                dataset=dataset.get("name"),
+                metrics={m["key"]: m["value"] for m in data.get("metrics", []) or []},
+                params={p["key"]: p.get("value", "") for p in data.get("params", []) or []},
+            )
+        )
+    return out
+
+
+def review_queues(
+    *, experiment: str, user: Optional[str] = None, workspace: Optional[str] = None
+) -> List[ReviewQueue]:
+    """The review queues in an experiment, or only one person's.
+
+    A GET, where the rest of this prefix is POST -- posting to it answers 405.
+    """
+    payload = get_client().get(
+        f"{_V3}/review-queues/list",
+        params={"experiment_id": experiment, **({"user": user} if user else {})},
+        workspace=workspace,
+    )
+    return [
+        ReviewQueue(
+            queue_id=raw.get("queue_id", ""),
+            experiment_id=str(raw.get("experiment_id", "")),
+            name=raw.get("name", ""),
+            queue_type=raw.get("queue_type", "CUSTOM"),
+            created_by=raw.get("created_by"),
+            users=list(raw.get("users") or []),
+        )
+        for raw in payload.get("review_queues", []) or []
+    ]
+
+
+def review_items(queue_id: str, *, workspace: Optional[str] = None) -> List[ReviewItem]:
+    """What is in a queue, and what has been decided about each of it."""
+    payload = get_client().get(
+        f"{_V3}/review-queues/items/list", params={"queue_id": queue_id}, workspace=workspace
+    )
+    return [
+        ReviewItem(
+            queue_id=raw.get("queue_id", ""),
+            item_id=raw.get("item_id", ""),
+            status=raw.get("status", "PENDING"),
+            item_type=raw.get("item_type", "TRACE"),
+            completed_by=raw.get("completed_by"),
+        )
+        for raw in payload.get("items", []) or []
+    ]
+
+
+def create_review_queue(
+    name: str,
+    *,
+    experiment: str,
+    queue_type: str = "CUSTOM",
+    workspace: Optional[str] = None,
+) -> ReviewQueue:
+    """Make a queue.
+
+    The type goes in uppercase. The engine rejects the lowercase spelling its
+    own Python enum uses, with "got proto enum value 0".
+    """
+    payload = get_client().post(
+        f"{_V3}/review-queues/create",
+        json={
+            "experiment_id": experiment,
+            "name": name,
+            "queue_type": queue_type.upper(),
+        },
+        workspace=workspace,
+    )
+    raw = payload.get("review_queue") or {}
+    return ReviewQueue(
+        queue_id=raw.get("queue_id", ""),
+        experiment_id=str(raw.get("experiment_id", "")),
+        name=raw.get("name", ""),
+        queue_type=raw.get("queue_type", "CUSTOM"),
+        created_by=raw.get("created_by"),
+        users=list(raw.get("users") or []),
+    )
+
+
+def add_to_review(queue_id: str, trace_ids: List[str], *, workspace: Optional[str] = None) -> None:
+    """Queue traces for somebody to read. `item_ids`, not `items`."""
+    if not trace_ids:
+        return
+    get_client().post(
+        f"{_V3}/review-queues/items/add",
+        json={"queue_id": queue_id, "item_ids": trace_ids, "item_type": "TRACE"},
+        workspace=workspace,
+    )
+
+
+def review(
+    queue_id: str,
+    trace_id: str,
+    status: str,
+    *,
+    by: Optional[str] = None,
+    workspace: Optional[str] = None,
+) -> None:
+    """Record a decision: PENDING, COMPLETE or DECLINED.
+
+    `by` is required when completing and the engine says so -- a completed
+    review has an author.
+    """
+    status = status.upper()
+    body = {"queue_id": queue_id, "item_id": trace_id, "status": status}
+    if status == "COMPLETE":
+        body["completed_by"] = by or "unknown"
+    get_client().post(f"{_V3}/review-queues/items/set-status", json=body, workspace=workspace)
 
 
 def assess(

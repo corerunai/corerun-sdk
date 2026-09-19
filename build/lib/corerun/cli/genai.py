@@ -6,7 +6,7 @@ Traces belong to an experiment, so every command that reads them names one --
 from here: the platform accepts OpenTelemetry on /v1/traces.
 """
 
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich.table import Table
@@ -19,8 +19,10 @@ app = typer.Typer(help="Agent traces, sessions and judges")
 
 traces_app = typer.Typer(help="Agent traces")
 sessions_app = typer.Typer(help="Conversations, grouped by session id")
+review_app = typer.Typer(help="Review queues: traces somebody was asked to look at")
 app.add_typer(traces_app, name="traces")
 app.add_typer(sessions_app, name="sessions")
+app.add_typer(review_app, name="review")
 
 
 def _init_client():
@@ -85,20 +87,20 @@ def list_traces(
     _init_client()
     from corerun import genai
 
-    found = _called(lambda: genai.traces(
-        experiment=experiment,
-        state=state,
-        session=session,
-        limit=limit,
-        workspace=workspace,
-    ))
+    found = _called(
+        lambda: genai.traces(
+            experiment=experiment,
+            state=state,
+            session=session,
+            limit=limit,
+            workspace=workspace,
+        )
+    )
 
     def render():
         if not found:
             console.print("[dim]No traces in this experiment yet.[/dim]")
-            console.print(
-                f"[dim]Export to /v1/traces with OTEL_SERVICE_NAME={experiment}[/dim]"
-            )
+            console.print(f"[dim]Export to /v1/traces with OTEL_SERVICE_NAME={experiment}[/dim]")
             return
         table = Table(show_header=True, header_style="bold")
         # Shortened, but only because a short id is now a valid one: `get` and
@@ -225,7 +227,8 @@ def _span_lines(detail, width: int):
             label = label[: name_width - 1] + "\u2026"
 
         failed = span.status == "ERROR"
-        style = "bold" if failed else ""
+        # The opening tag is written inline below, so only the closing one is
+        # worth a name. `style` was the other half of a pair that never formed.
         close = "[/bold]" if failed else ""
         mark = "!" if failed else " "
         tokens = f"{span.total_tokens:,}" if span.total_tokens else ""
@@ -307,7 +310,7 @@ def get_trace(
         facts = [f"{mark} {label}", f"[dim]{_duration(detail.duration_ms)}[/dim]"]
         if detail.total_tokens:
             facts.append(f"[dim]{detail.total_tokens:,} tokens[/dim]")
-        model = (root.attributes.get("gen_ai.request.model") if root else None)
+        model = root.attributes.get("gen_ai.request.model") if root else None
         if model:
             facts.append(f"[dim]{model}[/dim]")
         if detail.cost:
@@ -353,9 +356,7 @@ def delete_trace(
     trace_id = _resolve(trace_id, experiment, workspace)
     if not yes and not typer.confirm(f"Delete trace {trace_id} and everything recorded about it?"):
         raise typer.Exit(0)
-    _called(
-        lambda: genai.delete_traces([trace_id], experiment=experiment, workspace=workspace)
-    )
+    _called(lambda: genai.delete_traces([trace_id], experiment=experiment, workspace=workspace))
     output.emit({"deleted": trace_id}, lambda: console.print(f"[green]Deleted[/green] {trace_id}"))
 
 
@@ -372,13 +373,13 @@ def list_sessions(
     _init_client()
     from corerun import genai
 
-    found = _called(
-        lambda: genai.sessions(experiment=experiment, limit=limit, workspace=workspace)
-    )
+    found = _called(lambda: genai.sessions(experiment=experiment, limit=limit, workspace=workspace))
 
     def render():
         if not found:
-            console.print("[dim]No sessions. A session appears once traces carry a session id.[/dim]")
+            console.print(
+                "[dim]No sessions. A session appears once traces carry a session id.[/dim]"
+            )
             return
         table = Table(show_header=True, header_style="bold")
         table.add_column("Session")
@@ -423,9 +424,9 @@ def list_experiments(
         table.add_column("Last modified")
         for e in found:
             when = (
-                __import__("datetime").datetime.fromtimestamp(
-                    e.last_update_time / 1000
-                ).strftime("%d %b %H:%M")
+                __import__("datetime")
+                .datetime.fromtimestamp(e.last_update_time / 1000)
+                .strftime("%d %b %H:%M")
                 if e.last_update_time
                 else "-"
             )
@@ -467,13 +468,178 @@ def list_judges(
             kind = (
                 f"built-in · {blob['builtin_scorer_class']}"
                 if blob.get("builtin_scorer_class")
-                else "LLM judge"
-                if blob.get("instructions_judge_pydantic_data")
-                else "custom code"
-                if blob.get("call_source")
-                else "scorer"
+                else (
+                    "LLM judge"
+                    if blob.get("instructions_judge_pydantic_data")
+                    else "custom code" if blob.get("call_source") else "scorer"
+                )
             )
             table.add_row(j.name, str(j.version), kind)
         console.print(table)
 
     output.emit([j.__dict__ for j in found], render)
+
+
+@app.command("evaluations")
+def list_evaluations(
+    experiment: str = typer.Option(..., "--experiment", "-e", help="Which experiment's runs"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
+):
+    """List the evaluation runs in an experiment, newest first."""
+    if json_output:
+        output.set_json(True)
+    _init_client()
+    from corerun import genai
+
+    found = _called(lambda: genai.evaluation_runs(experiment=experiment, workspace=workspace))
+
+    def render():
+        if not found:
+            console.print("[dim]No evaluation runs yet.[/dim]")
+            console.print("[dim]They appear when an evaluation is scored against a dataset.[/dim]")
+            return
+
+        # The scores are the reason to look, so they are columns rather than a
+        # detail behind an id -- and which scores exist is whatever the runs
+        # carry, since a fixed set would be empty for anything judging
+        # something else.
+        keys = sorted({k for r in found for k in r.metrics})
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Run")
+        table.add_column("Status")
+        table.add_column("Dataset")
+        for key in keys:
+            table.add_column(key, justify="right")
+        for r in found:
+            table.add_row(
+                r.name,
+                "[red]FAILED[/red]" if r.failed else (r.status or "-"),
+                r.dataset or "-",
+                *[f"{r.metrics[k]:.2f}" if k in r.metrics else "-" for k in keys],
+            )
+        console.print(table)
+
+    output.emit([r.__dict__ for r in found], render)
+
+
+@review_app.command("queues")
+def list_review_queues(
+    experiment: str = typer.Option(..., "--experiment", "-e", help="Which experiment's queues"),
+    mine: Optional[str] = typer.Option(None, "--user", "-u", help="Only this person's queues"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
+):
+    """List the review queues in an experiment."""
+    if json_output:
+        output.set_json(True)
+    _init_client()
+    from corerun import genai
+
+    found = _called(
+        lambda: genai.review_queues(experiment=experiment, user=mine, workspace=workspace)
+    )
+
+    def render():
+        if not found:
+            console.print("[dim]No review queues. Make one with `corerun genai review new`.[/dim]")
+            return
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Queue")
+        table.add_column("Id", no_wrap=True)
+        table.add_column("Kind")
+        table.add_column("Owner")
+        for q in found:
+            table.add_row(
+                q.name,
+                q.queue_id[:20],
+                "yours" if q.queue_type == "USER" else "shared",
+                q.created_by or "-",
+            )
+        console.print(table)
+
+    output.emit([q.__dict__ for q in found], render)
+
+
+@review_app.command("show")
+def show_review_queue(
+    queue_id: str = typer.Argument(..., help="The queue to read"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
+):
+    """What is in a queue, and what has been decided about each trace."""
+    if json_output:
+        output.set_json(True)
+    _init_client()
+    from corerun import genai
+
+    found = _called(lambda: genai.review_items(queue_id, workspace=workspace))
+
+    def render():
+        if not found:
+            console.print("[dim]Nothing in this queue.[/dim]")
+            return
+        waiting = sum(1 for i in found if i.pending)
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Trace", no_wrap=True)
+        table.add_column("Status")
+        table.add_column("Reviewed by")
+        for i in found:
+            table.add_row(
+                i.item_id[:20],
+                "[yellow]needs review[/yellow]" if i.pending else (i.status or "-").lower(),
+                i.completed_by or "-",
+            )
+        console.print(table)
+        console.print(f"[dim]{waiting} of {len(found)} waiting for review.[/dim]")
+
+    output.emit([i.__dict__ for i in found], render)
+
+
+@review_app.command("new")
+def new_review_queue(
+    name: str = typer.Argument(..., help="What to call it"),
+    experiment: str = typer.Option(
+        ..., "--experiment", "-e", help="Which experiment it belongs to"
+    ),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
+):
+    """Make a review queue."""
+    _init_client()
+    from corerun import genai
+
+    made = _called(
+        lambda: genai.create_review_queue(name, experiment=experiment, workspace=workspace)
+    )
+    console.print(f"[green]Created[/green] {made.name} [dim]{made.queue_id}[/dim]")
+
+
+@review_app.command("add")
+def add_to_review_queue(
+    queue_id: str = typer.Argument(..., help="The queue to add to"),
+    trace_ids: List[str] = typer.Argument(..., help="Traces to queue"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
+):
+    """Queue traces for somebody to read."""
+    _init_client()
+    from corerun import genai
+
+    _called(lambda: genai.add_to_review(queue_id, list(trace_ids), workspace=workspace))
+    n = len(trace_ids)
+    console.print(f"[green]Queued[/green] {n} trace{'' if n == 1 else 's'} for review")
+
+
+@review_app.command("decide")
+def decide_review_item(
+    queue_id: str = typer.Argument(..., help="The queue the trace is in"),
+    trace_id: str = typer.Argument(..., help="The trace decided about"),
+    status: str = typer.Argument(..., help="complete, declined or pending"),
+    by: Optional[str] = typer.Option(None, "--by", help="Who reviewed it; required to complete"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
+):
+    """Record a decision about a trace in a queue."""
+    _init_client()
+    from corerun import genai
+
+    _called(lambda: genai.review(queue_id, trace_id, status, by=by, workspace=workspace))
+    console.print(f"[green]Recorded[/green] {status.lower()} for {trace_id[:20]}")
