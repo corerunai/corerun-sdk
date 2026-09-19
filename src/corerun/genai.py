@@ -1,45 +1,165 @@
 """
 GenAI observability for the corerun SDK.
 
-Agent traces: a span tree for one invocation, the sessions those traces group
-into, and what a workspace has asked to keep.
+Agent traces: a span tree for one invocation, the sessions they group into, the
+judges that score them and the datasets they run against.
 
-These are not the same thing as `corerun.traces`, which is the record of
-requests through a model endpoint. Two features, two prefixes, and a token
-scoped to one does not reach the other.
+Not the same thing as `corerun.traces`, which is the record of requests through
+a model endpoint. Two features, two prefixes, and a token scoped to one does
+not reach the other.
 
-Sending traces needs nothing from here: point any OpenTelemetry exporter at
-the platform and it arrives.
+**Sending traces needs nothing from here.** The platform accepts OpenTelemetry
+on its own endpoint, so any instrumented application already speaks it:
 
-    OTEL_EXPORTER_OTLP_ENDPOINT=https://<host>
-    OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-    OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <key>,X-Workspace-ID=<id>
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://<host>/v1/traces
+    OTEL_EXPORTER_OTLP_TRACES_HEADERS=Authorization=Bearer <key>
+    OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+    OTEL_SERVICE_NAME=<the experiment's name>
+
+Which experiment a trace belongs to comes from `service.name` -- the resource
+attribute every OpenTelemetry deployment already sets, usually through
+OTEL_SERVICE_NAME. It means here what it means everywhere: which application
+these spans came from. So an application that names itself needs nothing added
+at all, and a name nobody has used yet is created on the first export.
+
+Pointing an exporter at the URL is the whole setup.
 
 This module is for reading them back.
 
 Usage:
     import corerun
+    corerun.init()
 
-    corerun.init(auth_token="...")
+    for experiment in corerun.genai.experiments():
+        print(experiment.experiment_id, experiment.name)
 
-    # The most recent traces
-    for trace in corerun.genai.traces():
-        print(trace.trace_id, trace.root_span_name, trace.duration_ms)
+    for trace in corerun.genai.traces(experiment="2"):
+        print(trace.trace_id, trace.state, trace.duration_ms)
 
-    # One trace, with its spans
-    detail = corerun.genai.trace("4536c69e4220348fc027e1292a04da8a")
+    detail = corerun.genai.trace("tr-1c803305208d9e1b9cc32a302a56ade2")
     for span in detail.spans:
-        print(span.name, span.duration_ms)
-
-    # Conversations
-    for session in corerun.genai.sessions():
-        print(session.session_id, session.trace_count)
+        print(span.name, span.span_type, span.duration_ms)
 """
 
+import base64
+import binascii
+import json
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
 from corerun.config import get_client
+
+# The engine is reached under the platform's own prefix, and authorised there
+# like every other path. Versions differ per endpoint rather than per API, and
+# a few endpoints exist only on the console's `ajax-api` -- deleting an
+# experiment is one, and the REST path answers 404 for it.
+_V2 = "/genai/api/2.0/mlflow"
+_V3 = "/genai/api/3.0/mlflow"
+_AJAX2 = "/genai/ajax-api/2.0/mlflow"
+
+# Where the engine keeps the session id and the token counts: metadata keys,
+# not columns.
+_SESSION_KEY = "mlflow.trace.session"
+_TOKENS_KEY = "mlflow.trace.tokenUsage"
+_COST_KEY = "mlflow.trace.cost"
+
+_DURATION = re.compile(r"([\d.]+)\s*(ms|s|m|h)")
+_UNITS = {"ms": 1.0, "s": 1000.0, "m": 60_000.0, "h": 3_600_000.0}
+
+
+def _duration_ms(formatted: Optional[str]) -> Optional[float]:
+    """"2.400s" or "1m 3s" as a number.
+
+    The engine formats this for display. Unparseable reads as absent rather
+    than as zero: a trace of unknown duration is not one that took no time.
+    """
+    if not formatted:
+        return None
+    total, matched = 0.0, False
+    for value, unit in _DURATION.findall(formatted):
+        try:
+            total += float(value) * _UNITS[unit]
+            matched = True
+        except (ValueError, KeyError):
+            continue
+    return total if matched else None
+
+
+def _metadata_json(metadata: Dict[str, str], key: str) -> Dict[str, Any]:
+    raw = (metadata or {}).get(key)
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _hex(encoded: Optional[str]) -> Optional[str]:
+    """Span ids come back base64; everything that reads one wants hex."""
+    if not encoded:
+        return None
+    if re.fullmatch(r"[0-9a-fA-F]+", encoded) and len(encoded) % 2 == 0:
+        return encoded.lower()
+    try:
+        return base64.b64decode(encoded).hex()
+    except (binascii.Error, ValueError):
+        return encoded
+
+
+def _any_value(value: Optional[Dict[str, Any]]) -> Any:
+    """An OTLP attribute value, as an ordinary Python one.
+
+    Exactly one field is set and an empty object means null, so this is a union
+    unwrap rather than a parse. Integers arrive as strings because proto3 JSON
+    says 64-bit numbers do.
+    """
+    if not value:
+        return None
+    if "string_value" in value:
+        return value["string_value"]
+    if "bool_value" in value:
+        return value["bool_value"]
+    if "double_value" in value:
+        return value["double_value"]
+    if "int_value" in value:
+        try:
+            return int(value["int_value"])
+        except (TypeError, ValueError):
+            return value["int_value"]
+    if "array_value" in value:
+        return [_any_value(v) for v in value["array_value"].get("values", [])]
+    if "kvlist_value" in value:
+        return {
+            entry["key"]: _any_value(entry.get("value"))
+            for entry in value["kvlist_value"].get("values", [])
+        }
+    return None
+
+
+def _decoded(text: Any) -> Any:
+    """The engine JSON-encodes some attribute values, quotes and all."""
+    if not isinstance(text, str):
+        return text
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return text
+
+
+@dataclass
+class Experiment:
+    """Where traces are collected. A trace belongs to exactly one."""
+
+    experiment_id: str
+    name: str
+    artifact_location: Optional[str] = None
+    lifecycle_stage: Optional[str] = None
+    creation_time: Optional[int] = None
+    last_update_time: Optional[int] = None
+    tags: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -47,25 +167,28 @@ class Trace:
     """One agent invocation, summarised."""
 
     trace_id: str
-    root_span_name: Optional[str] = None
-    state: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    duration_ms: Optional[float] = None
-    session_id: Optional[str] = None
     experiment_id: Optional[str] = None
+    session_id: Optional[str] = None
+    state: str = "OK"
+    start_time: Optional[datetime] = None
+    duration_ms: Optional[float] = None
     input_preview: Optional[str] = None
     output_preview: Optional[str] = None
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
-    provider: Optional[str] = None
-    request_model: Optional[str] = None
-    agent_name: Optional[str] = None
-    tags: Dict[str, Any] = field(default_factory=dict)
+    cost: Optional[float] = None
+    tags: Dict[str, str] = field(default_factory=dict)
 
     @property
     def failed(self) -> bool:
+        """Whether this invocation ended badly.
+
+        The engine spells it in a state string, and every caller that wants to
+        know asks the same question of it. Hiding the spelling is what the
+        dataclass is for -- and it is the one comparison a caller gets wrong
+        silently, by testing for "FAILED" or "error" and matching nothing.
+        """
         return self.state == "ERROR"
 
 
@@ -77,202 +200,370 @@ class Span:
     name: str
     parent_span_id: Optional[str] = None
     span_type: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
+    start_time: Optional[datetime] = None
     duration_ms: Optional[float] = None
     status: Optional[str] = None
-    status_message: Optional[str] = None
-    operation: Optional[str] = None
-    provider: Optional[str] = None
-    request_model: Optional[str] = None
-    response_model: Optional[str] = None
-    agent_name: Optional[str] = None
-    tool_name: Optional[str] = None
     inputs: Any = None
     outputs: Any = None
-    attributes: Dict[str, Any] = field(default_factory=dict)
-    events: Any = None
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
-    cached_input_tokens: Optional[int] = None
-    reasoning_output_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
+    attributes: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class TraceDetail(Trace):
-    """A trace with the spans it is made of."""
+    """A trace with everything it did."""
 
     spans: List[Span] = field(default_factory=list)
+    assessments: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
 class Session:
-    """A conversation: the traces sharing one session id."""
+    """A conversation: the traces that carry the same session id.
+
+    Derived rather than stored. The engine has no sessions endpoint, and its
+    own console groups traces the same way.
+    """
 
     session_id: str
     trace_count: int = 0
     error_count: int = 0
     total_tokens: int = 0
-    first_seen: Optional[str] = None
-    last_seen: Optional[str] = None
+    first_seen: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
 
 
 @dataclass
-class Settings:
-    """What this workspace keeps, and how much of it it records."""
+class Judge:
+    """A scorer registered against an experiment."""
 
-    retention_days: Optional[int] = None
-    sample_rate: float = 1.0
-    updated_at: Optional[str] = None
-    updated_by: Optional[str] = None
+    scorer_id: str
+    name: str
+    version: int = 1
+    experiment_id: Optional[str] = None
+    serialized_scorer: str = ""
 
 
-def _known(cls, payload: Dict[str, Any]):
-    """Build a dataclass from a payload, ignoring fields it does not declare.
+def _when(iso: Optional[str]) -> Optional[datetime]:
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
-    The service adds fields between releases, and an SDK older than the server
-    should return the trace rather than raise on a name it has not heard of.
+
+def _nanos(value: Any) -> Optional[datetime]:
+    try:
+        return datetime.fromtimestamp(int(value) / 1e9, tz=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_trace(info: Dict[str, Any]) -> Trace:
+    metadata = info.get("trace_metadata") or {}
+    usage = _metadata_json(metadata, _TOKENS_KEY)
+    cost = _metadata_json(metadata, _COST_KEY)
+    tags = info.get("tags") or {}
+    return Trace(
+        trace_id=info.get("trace_id", ""),
+        experiment_id=(info.get("trace_location") or {})
+        .get("mlflow_experiment", {})
+        .get("experiment_id"),
+        session_id=metadata.get(_SESSION_KEY) or tags.get(_SESSION_KEY),
+        state=info.get("state") or "OK",
+        start_time=_when(info.get("request_time")),
+        duration_ms=_duration_ms(info.get("execution_duration")),
+        input_preview=info.get("request_preview"),
+        output_preview=info.get("response_preview"),
+        input_tokens=usage.get("input_tokens"),
+        output_tokens=usage.get("output_tokens"),
+        total_tokens=usage.get("total_tokens"),
+        cost=cost.get("total_cost"),
+        tags={k: v for k, v in tags.items() if not k.startswith("mlflow.")},
+    )
+
+
+def _to_span(raw: Dict[str, Any]) -> Span:
+    attributes = {
+        entry["key"]: _any_value(entry.get("value")) for entry in raw.get("attributes", [])
+    }
+    start = raw.get("start_time_unix_nano")
+    end = raw.get("end_time_unix_nano")
+    duration = None
+    try:
+        if start is not None and end is not None and int(end) > int(start):
+            duration = (int(end) - int(start)) / 1e6
+    except (TypeError, ValueError):
+        duration = None
+
+    usage = attributes.get("mlflow.chat.tokenUsage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+
+    return Span(
+        span_id=_hex(raw.get("span_id")) or "",
+        parent_span_id=_hex(raw.get("parent_span_id")),
+        name=raw.get("name", ""),
+        span_type=_decoded(attributes.get("mlflow.spanType")),
+        start_time=_nanos(start),
+        duration_ms=duration,
+        status=(raw.get("status") or {}).get("code"),
+        inputs=attributes.get("mlflow.spanInputs") or attributes.get("gen_ai.input.messages"),
+        outputs=attributes.get("mlflow.spanOutputs") or attributes.get("gen_ai.output.messages"),
+        input_tokens=usage.get("input_tokens") or attributes.get("gen_ai.usage.input_tokens"),
+        output_tokens=usage.get("output_tokens") or attributes.get("gen_ai.usage.output_tokens"),
+        total_tokens=usage.get("total_tokens"),
+        attributes=attributes,
+    )
+
+
+def experiments(*, limit: int = 200, workspace: Optional[str] = None) -> List[Experiment]:
+    """Every experiment in the workspace, most recently touched first."""
+    payload = get_client().get(
+        f"{_V2}/experiments/search",
+        params={"max_results": limit, "order_by": "last_update_time DESC"},
+        workspace=workspace,
+    )
+    out = []
+    for raw in payload.get("experiments", []) or []:
+        out.append(
+            Experiment(
+                experiment_id=raw.get("experiment_id", ""),
+                name=raw.get("name", ""),
+                artifact_location=raw.get("artifact_location"),
+                lifecycle_stage=raw.get("lifecycle_stage"),
+                creation_time=raw.get("creation_time"),
+                last_update_time=raw.get("last_update_time"),
+                tags={t["key"]: t.get("value", "") for t in raw.get("tags", []) or []},
+            )
+        )
+    return out
+
+
+def create_experiment(name: str, *, workspace: Optional[str] = None) -> str:
+    """Make one, and return its id. An exporter can also create it by naming it."""
+    payload = get_client().post(
+        f"{_V2}/experiments/create", json={"name": name}, workspace=workspace
+    )
+    return payload.get("experiment_id", "")
+
+
+def delete_experiment(experiment_id: str, *, workspace: Optional[str] = None) -> None:
+    """Delete one.
+
+    On the console-only prefix at version 2: the REST path and both version-3
+    spellings answer 404, which would read as the experiment being gone
+    already.
     """
-    allowed = {f.name for f in cls.__dataclass_fields__.values()}
-    return cls(**{k: v for k, v in payload.items() if k in allowed})
+    get_client().post(
+        f"{_AJAX2}/experiments/delete",
+        json={"experiment_id": experiment_id},
+        workspace=workspace,
+    )
 
 
 def traces(
     *,
-    search: Optional[str] = None,
-    state: Optional[str] = None,
-    session_id: Optional[str] = None,
-    experiment_id: Optional[str] = None,
-    model: Optional[str] = None,
-    since: Optional[str] = None,
-    until: Optional[str] = None,
+    experiment: str,
     limit: int = 50,
+    state: Optional[str] = None,
+    session: Optional[str] = None,
     page_token: Optional[str] = None,
     workspace: Optional[str] = None,
 ) -> List[Trace]:
-    """One page of traces, most recent first.
+    """The most recent traces in an experiment.
 
-    Args:
-        search: matches trace id, input or output
-        state: OK, ERROR or IN_PROGRESS
-        session_id: only the traces in one conversation
-        experiment_id: only the traces of one experiment
-        model: only traces that asked this model
-        since / until: RFC 3339 timestamps
-        limit: how many to return
-        page_token: the token from a previous page
-        workspace: workspace id (uses the default if not given)
-
-    Example:
-        failed = corerun.genai.traces(state="ERROR", limit=10)
+    An experiment is required because the engine reads traces out of one: there
+    is no such thing as the traces of a workspace at large.
     """
-    params = {
-        "search": search,
-        "state": state,
-        "session_id": session_id,
-        "experiment_id": experiment_id,
-        "model": model,
-        "since": since,
-        "until": until,
-        "limit": limit,
-        "page_token": page_token,
+    filters = []
+    if state:
+        filters.append(f"attributes.status = '{state}'")
+    if session:
+        filters.append(f"metadata.`{_SESSION_KEY}` = '{session}'")
+
+    body: Dict[str, Any] = {
+        "locations": [
+            {"type": "MLFLOW_EXPERIMENT", "mlflow_experiment": {"experiment_id": experiment}}
+        ],
+        "max_results": limit,
+        # 'timestamp', not 'request_time': the search filters and sorts on the
+        # stored attribute names while answering in the newer ones, so the
+        # field you sort by and the field you read back are spelled
+        # differently for the same thing.
+        "order_by": ["timestamp DESC"],
     }
-    response = get_client().get(
-        "/genai/traces",
-        params={k: v for k, v in params.items() if v is not None},
-        workspace=workspace,
-    )
-    return [_known(Trace, t) for t in response.get("traces") or []]
+    if filters:
+        body["filter"] = " AND ".join(filters)
+    if page_token:
+        body["page_token"] = page_token
+
+    payload = get_client().post(f"{_V3}/traces/search", json=body, workspace=workspace)
+    return [_to_trace(raw) for raw in payload.get("traces", []) or []]
 
 
-def iter_traces(*, page_size: int = 100, workspace: Optional[str] = None, **filters) -> Iterator[Trace]:
-    """Every trace matching the filters, following the pages.
-
-    A generator rather than a list: a busy workspace has more traces than
-    anyone wants in memory, and most callers stop early.
-
-    Example:
-        for trace in corerun.genai.iter_traces(state="ERROR"):
-            print(trace.trace_id)
-    """
-    token: Optional[str] = None
+def iter_traces(
+    *, experiment: str, page_size: int = 100, workspace: Optional[str] = None, **filters
+) -> Iterator[Trace]:
+    """Every trace in an experiment, a page at a time."""
+    token = None
     while True:
-        params = {
-            **{k: v for k, v in filters.items() if v is not None},
-            "limit": page_size,
+        body: Dict[str, Any] = {
+            "locations": [
+                {"type": "MLFLOW_EXPERIMENT", "mlflow_experiment": {"experiment_id": experiment}}
+            ],
+            "max_results": page_size,
+            "order_by": ["timestamp DESC"],
         }
         if token:
-            params["page_token"] = token
-        response = get_client().get("/genai/traces", params=params, workspace=workspace)
-        page = response.get("traces") or []
-        for payload in page:
-            yield _known(Trace, payload)
-        token = response.get("next_page_token")
-        if not token or not page:
+            body["page_token"] = token
+        payload = get_client().post(f"{_V3}/traces/search", json=body, workspace=workspace)
+
+        rows = payload.get("traces", []) or []
+        for raw in rows:
+            yield _to_trace(raw)
+
+        token = payload.get("next_page_token")
+        if not token or not rows:
             return
 
 
 def trace(trace_id: str, *, workspace: Optional[str] = None) -> TraceDetail:
-    """One trace and its spans.
+    """One trace, with its spans.
 
-    Example:
-        detail = corerun.genai.trace("4536c69e...")
-        print(len(detail.spans), "spans")
+    The batch read, for one: it is the only endpoint that answers with a trace
+    and its spans together. Asking for the trace alone returns a record with no
+    spans, and the artifact they used to live in is not where this engine keeps
+    them.
     """
-    payload = get_client().get(f"/genai/traces/{trace_id}", workspace=workspace)
-    detail = _known(TraceDetail, payload)
-    detail.spans = [_known(Span, s) for s in payload.get("spans") or []]
-    return detail
+    payload = get_client().get(
+        f"{_V3}/traces/batchGet", params={"trace_ids": trace_id}, workspace=workspace
+    )
+    rows = payload.get("traces", []) or []
+    if not rows:
+        raise ValueError(f"No trace {trace_id!r}")
+
+    got = rows[0]
+    summary = _to_trace(got.get("trace_info") or {})
+    return TraceDetail(
+        **summary.__dict__,
+        spans=[_to_span(raw) for raw in got.get("spans", []) or []],
+        assessments=(got.get("trace_info") or {}).get("assessments", []) or [],
+    )
 
 
-def delete_trace(trace_id: str, *, workspace: Optional[str] = None) -> None:
-    """Delete a trace and everything recorded about it."""
-    get_client().delete(f"/genai/traces/{trace_id}", workspace=workspace)
+def delete_traces(
+    trace_ids: List[str], *, experiment: str, workspace: Optional[str] = None
+) -> int:
+    """Delete traces, and say how many went.
+
+    `request_ids`, though the engine's own error for leaving it out asks for
+    `trace_ids` -- sending the name it asks for repeats the same sentence.
+    """
+    if not trace_ids:
+        return 0
+    payload = get_client().post(
+        f"{_V3}/traces/delete-traces",
+        json={"experiment_id": experiment, "request_ids": trace_ids},
+        workspace=workspace,
+    )
+    return payload.get("traces_deleted", 0)
+
+
+def set_tag(trace_id: str, key: str, value: str, *, workspace: Optional[str] = None) -> None:
+    """Set one tag on one trace."""
+    get_client().patch(
+        f"{_V3}/traces/{trace_id}/tags", json={"key": key, "value": value}, workspace=workspace
+    )
 
 
 def sessions(
-    *,
-    limit: int = 50,
-    page_token: Optional[str] = None,
-    workspace: Optional[str] = None,
+    *, experiment: str, limit: int = 500, workspace: Optional[str] = None
 ) -> List[Session]:
-    """Conversations, most recently active first.
+    """The conversations in an experiment.
 
-    Example:
-        for s in corerun.genai.sessions():
-            print(s.session_id, s.trace_count, "traces")
+    Grouped here because the engine has no sessions endpoint. A trace with no
+    session id belongs to no conversation and is left out rather than given one
+    of its own.
     """
-    params: Dict[str, Any] = {"limit": limit}
-    if page_token:
-        params["page_token"] = page_token
-    response = get_client().get("/genai/sessions", params=params, workspace=workspace)
-    return [_known(Session, s) for s in response.get("sessions") or []]
+    grouped: Dict[str, Session] = {}
+    for item in traces(experiment=experiment, limit=limit, workspace=workspace):
+        if not item.session_id:
+            continue
+        session = grouped.get(item.session_id)
+        if session is None:
+            grouped[item.session_id] = Session(
+                session_id=item.session_id,
+                trace_count=1,
+                error_count=1 if item.state == "ERROR" else 0,
+                total_tokens=item.total_tokens or 0,
+                first_seen=item.start_time,
+                last_seen=item.start_time,
+            )
+            continue
+        session.trace_count += 1
+        session.total_tokens += item.total_tokens or 0
+        if item.state == "ERROR":
+            session.error_count += 1
+        if item.start_time and session.first_seen and item.start_time < session.first_seen:
+            session.first_seen = item.start_time
+        if item.start_time and session.last_seen and item.start_time > session.last_seen:
+            session.last_seen = item.start_time
+
+    return sorted(
+        grouped.values(),
+        key=lambda s: s.last_seen or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
 
 
-def settings(*, workspace: Optional[str] = None) -> Settings:
-    """What this workspace keeps, and how much of it it records."""
-    return _known(Settings, get_client().get("/genai/settings", workspace=workspace))
+def judges(*, experiment: str, workspace: Optional[str] = None) -> List[Judge]:
+    """The judges registered against an experiment."""
+    payload = get_client().get(
+        f"{_V3}/scorers/list", params={"experiment_id": experiment}, workspace=workspace
+    )
+    return [
+        Judge(
+            scorer_id=raw.get("scorer_id", ""),
+            # `scorer_name` coming back, `name` going in. The engine is not
+            # symmetric here.
+            name=raw.get("scorer_name") or raw.get("name") or "",
+            version=raw.get("scorer_version") or raw.get("version") or 1,
+            experiment_id=str(raw.get("experiment_id", "")),
+            serialized_scorer=raw.get("serialized_scorer", ""),
+        )
+        for raw in payload.get("scorers", []) or []
+    ]
 
 
-def configure(
+def assess(
+    trace_id: str,
+    name: str,
+    value: Any,
     *,
-    retention_days: Optional[int] = None,
-    sample_rate: Optional[float] = None,
+    rationale: Optional[str] = None,
+    span_id: Optional[str] = None,
     workspace: Optional[str] = None,
-) -> Settings:
-    """Change retention or sampling.
+) -> Dict[str, Any]:
+    """Record a judgement against a trace.
 
-    Sampling is not a performance knob for the platform; it is how much of what
-    an application sends is kept. Retention is in days, and None means keep
-    until something deletes it.
-
-    Example:
-        corerun.genai.configure(retention_days=30, sample_rate=0.25)
+    The source is a person: this is the call a reviewer's script makes, and a
+    judge's own scores are written by the judge.
     """
-    body: Dict[str, Any] = {}
-    if retention_days is not None:
-        body["retention_days"] = retention_days
-    if sample_rate is not None:
-        body["sample_rate"] = sample_rate
-    return _known(Settings, get_client().put("/genai/settings", json=body, workspace=workspace))
+    assessment: Dict[str, Any] = {
+        "trace_id": trace_id,
+        "assessment_name": name,
+        "source": {"source_type": "HUMAN"},
+        "feedback": {"value": value},
+    }
+    if rationale:
+        assessment["rationale"] = rationale
+    if span_id:
+        assessment["span_id"] = span_id
+
+    return get_client().post(
+        f"{_V3}/traces/{trace_id}/assessments", json={"assessment": assessment}, workspace=workspace
+    )

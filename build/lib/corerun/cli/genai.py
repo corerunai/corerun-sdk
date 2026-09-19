@@ -1,5 +1,9 @@
 """
-GenAI observability CLI commands: agent traces, sessions and retention.
+GenAI observability CLI: experiments, agent traces, sessions and judges.
+
+Traces belong to an experiment, so every command that reads them names one --
+`corerun genai experiments` lists what there is. Sending traces needs nothing
+from here: the platform accepts OpenTelemetry on /v1/traces.
 """
 
 from typing import Optional
@@ -11,7 +15,7 @@ from corerun.cli import output
 from corerun.exceptions import CoreRunError
 
 console = output.console
-app = typer.Typer(help="Agent traces, sessions and retention")
+app = typer.Typer(help="Agent traces, sessions and judges")
 
 traces_app = typer.Typer(help="Agent traces")
 sessions_app = typer.Typer(help="Conversations, grouped by session id")
@@ -63,52 +67,56 @@ def _short(text: Optional[str], width: int = 40) -> str:
 
 @traces_app.command("list")
 def list_traces(
+    experiment: str = typer.Option(..., "--experiment", "-e", help="Which experiment's traces"),
     state: Optional[str] = typer.Option(None, "--state", help="OK, ERROR or IN_PROGRESS"),
     session: Optional[str] = typer.Option(None, "--session", help="Only one conversation"),
-    model: Optional[str] = typer.Option(None, "--model", help="Only traces that asked this model"),
-    search: Optional[str] = typer.Option(None, "--search", help="Match id, input or output"),
-    since: Optional[str] = typer.Option(None, "--since", help="RFC 3339 timestamp"),
     limit: int = typer.Option(25, "--limit"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
 ):
-    """List agent traces, most recent first."""
+    """List agent traces in an experiment, most recent first.
+
+    An experiment is required because the engine reads traces out of one: there
+    are no traces of a workspace at large. `corerun genai experiments` lists
+    them.
+    """
     if json_output:
         output.set_json(True)
     _init_client()
     from corerun import genai
 
     found = _called(lambda: genai.traces(
+        experiment=experiment,
         state=state,
-        session_id=session,
-        model=model,
-        search=search,
-        since=since,
+        session=session,
         limit=limit,
         workspace=workspace,
     ))
 
     def render():
         if not found:
-            console.print("[dim]No traces. Point an instrumented application at this workspace.[/dim]")
+            console.print("[dim]No traces in this experiment yet.[/dim]")
+            console.print(
+                f"[dim]Export to /v1/traces with OTEL_SERVICE_NAME={experiment}[/dim]"
+            )
             return
         table = Table(show_header=True, header_style="bold")
         # Shortened, but only because a short id is now a valid one: `get` and
-        # `delete` resolve a prefix. A whole 32-character id in an 80-column
-        # terminal squeezes every other column to nothing, and the id was the
-        # only part of the row that survived -- which is the wrong trade when
-        # the rest of the row is what tells you which trace you want.
+        # `delete` resolve a prefix. A whole id in an 80-column terminal
+        # squeezes every other column to nothing, and the id was the only part
+        # of the row that survived -- the wrong trade when the rest of the row
+        # is what tells you which trace you want.
         table.add_column("Trace", no_wrap=True)
-        table.add_column("Root span")
+        table.add_column("Input")
         table.add_column("State")
         table.add_column("Duration", justify="right")
         table.add_column("Tokens", justify="right")
         table.add_column("Session")
         for t in found:
             table.add_row(
-                t.trace_id[:16],
-                _short(t.root_span_name, 28),
-                "[red]ERROR[/red]" if t.failed else (t.state or "-"),
+                t.trace_id[:20],
+                _short(t.input_preview, 30),
+                "[red]ERROR[/red]" if t.state == "ERROR" else (t.state or "-"),
                 _duration(t.duration_ms),
                 f"{t.total_tokens:,}" if t.total_tokens else "-",
                 t.session_id or "-",
@@ -188,10 +196,10 @@ def _span_lines(detail, width: int):
     if not ordered:
         return None
 
-    def moment(iso):
-        from datetime import datetime
-
-        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() if iso else None
+    def moment(when):
+        # A datetime, as the SDK hands it over -- it parses the engine's
+        # timestamp once rather than every reader doing it again.
+        return when.timestamp() if when is not None else None
 
     starts = [moment(s.start_time) for _, s in ordered]
     starts = [m for m in starts if m is not None]
@@ -230,7 +238,7 @@ def _span_lines(detail, width: int):
     return lines, name_width, bar_width
 
 
-def _resolve(trace_id: str, workspace: Optional[str]) -> str:
+def _resolve(trace_id: str, experiment: str, workspace: Optional[str]) -> str:
     """Accept a shortened id and return the whole one.
 
     A trace id is 32 hex characters, and every place that displays one shortens
@@ -243,16 +251,19 @@ def _resolve(trace_id: str, workspace: Optional[str]) -> str:
     """
     from corerun import genai
 
-    if len(trace_id) >= 32:
+    # A whole id carries the engine's own "tr-" prefix and 32 hex characters.
+    if len(trace_id) >= 35:
         return trace_id
 
     matching = [
         t.trace_id
-        for t in _called(lambda: genai.traces(search=trace_id, limit=50, workspace=workspace))
+        for t in _called(
+            lambda: genai.traces(experiment=experiment, limit=200, workspace=workspace)
+        )
         if t.trace_id.startswith(trace_id)
     ]
     if not matching:
-        raise output.fail(f"no trace starting with {trace_id} in this workspace")
+        raise output.fail(f"no trace starting with {trace_id} in experiment {experiment}")
     if len(matching) > 1:
         raise output.fail(
             f"{trace_id} names {len(matching)} traces: " + ", ".join(m[:16] for m in matching[:4])
@@ -263,6 +274,7 @@ def _resolve(trace_id: str, workspace: Optional[str]) -> str:
 @traces_app.command("get")
 def get_trace(
     trace_id: str = typer.Argument(..., help="The trace id, or enough of its start to be unique"),
+    experiment: str = typer.Option(..., "--experiment", "-e", help="Which experiment it is in"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
 ):
@@ -272,7 +284,9 @@ def get_trace(
     _init_client()
     from corerun import genai
 
-    detail = _called(lambda: genai.trace(_resolve(trace_id, workspace), workspace=workspace))
+    detail = _called(
+        lambda: genai.trace(_resolve(trace_id, experiment, workspace), workspace=workspace)
+    )
 
     def render():
         # Capped rather than the full terminal: on a wide screen the bars end
@@ -285,15 +299,19 @@ def get_trace(
         label = {"ERROR": "Error", "IN_PROGRESS": "In progress"}.get(state, "Success")
 
         console.print()
+        root = next((sp for sp in detail.spans if not sp.parent_span_id), None)
         console.print(
-            f"[bold]{detail.root_span_name or 'trace'}[/bold]  [dim]{detail.trace_id}[/dim]"
+            f"[bold]{(root.name if root else None) or 'trace'}[/bold]  [dim]{detail.trace_id}[/dim]"
         )
 
         facts = [f"{mark} {label}", f"[dim]{_duration(detail.duration_ms)}[/dim]"]
         if detail.total_tokens:
             facts.append(f"[dim]{detail.total_tokens:,} tokens[/dim]")
-        if detail.request_model:
-            facts.append(f"[dim]{detail.request_model}[/dim]")
+        model = (root.attributes.get("gen_ai.request.model") if root else None)
+        if model:
+            facts.append(f"[dim]{model}[/dim]")
+        if detail.cost:
+            facts.append(f"[dim]${detail.cost:.4f}[/dim]")
         if detail.session_id:
             facts.append(f"[dim]session {detail.session_id}[/dim]")
         console.print("  " + "  [dim]\u00b7[/dim]  ".join(facts))
@@ -321,6 +339,7 @@ def get_trace(
 @traces_app.command("delete")
 def delete_trace(
     trace_id: str = typer.Argument(..., help="The trace id"),
+    experiment: str = typer.Option(..., "--experiment", "-e", help="Which experiment it is in"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
@@ -331,15 +350,18 @@ def delete_trace(
     _init_client()
     from corerun import genai
 
-    trace_id = _resolve(trace_id, workspace)
+    trace_id = _resolve(trace_id, experiment, workspace)
     if not yes and not typer.confirm(f"Delete trace {trace_id} and everything recorded about it?"):
         raise typer.Exit(0)
-    _called(lambda: genai.delete_trace(trace_id, workspace=workspace))
+    _called(
+        lambda: genai.delete_traces([trace_id], experiment=experiment, workspace=workspace)
+    )
     output.emit({"deleted": trace_id}, lambda: console.print(f"[green]Deleted[/green] {trace_id}"))
 
 
 @sessions_app.command("list")
 def list_sessions(
+    experiment: str = typer.Option(..., "--experiment", "-e", help="Which experiment's sessions"),
     limit: int = typer.Option(25, "--limit"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
@@ -350,7 +372,9 @@ def list_sessions(
     _init_client()
     from corerun import genai
 
-    found = _called(lambda: genai.sessions(limit=limit, workspace=workspace))
+    found = _called(
+        lambda: genai.sessions(experiment=experiment, limit=limit, workspace=workspace)
+    )
 
     def render():
         if not found:
@@ -368,40 +392,88 @@ def list_sessions(
                 str(s.trace_count),
                 f"[red]{s.error_count}[/red]" if s.error_count else "-",
                 f"{s.total_tokens:,}" if s.total_tokens else "-",
-                s.last_seen or "-",
+                s.last_seen.strftime("%d %b %H:%M") if s.last_seen else "-",
             )
         console.print(table)
 
     output.emit([s.__dict__ for s in found], render)
 
 
-@app.command("settings")
-def show_settings(
-    retention_days: Optional[int] = typer.Option(None, "--retention-days", help="Set retention"),
-    sample_rate: Optional[float] = typer.Option(None, "--sample-rate", help="Set sampling, 0 to 1"),
+@app.command("experiments")
+def list_experiments(
+    limit: int = typer.Option(50, "--limit"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
 ):
-    """Show or change what this workspace keeps."""
+    """List the experiments traces are collected into."""
     if json_output:
         output.set_json(True)
     _init_client()
     from corerun import genai
 
-    if retention_days is None and sample_rate is None:
-        current = _called(lambda: genai.settings(workspace=workspace))
-    else:
-        current = _called(
-            lambda: genai.configure(
-                retention_days=retention_days, sample_rate=sample_rate, workspace=workspace
-            )
-        )
+    found = _called(lambda: genai.experiments(limit=limit, workspace=workspace))
 
     def render():
-        kept = "kept until deleted" if not current.retention_days else f"{current.retention_days} days"
-        console.print(f"Retention:  {kept}")
-        console.print(f"Sampling:   {current.sample_rate:g}")
-        if current.updated_by:
-            console.print(f"[dim]last changed by {current.updated_by} {current.updated_at or ''}[/dim]")
+        if not found:
+            console.print("[dim]No experiments yet. An exporter creates one by naming it.[/dim]")
+            return
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("ID", no_wrap=True)
+        table.add_column("Name")
+        table.add_column("Last modified")
+        for e in found:
+            when = (
+                __import__("datetime").datetime.fromtimestamp(
+                    e.last_update_time / 1000
+                ).strftime("%d %b %H:%M")
+                if e.last_update_time
+                else "-"
+            )
+            table.add_row(e.experiment_id, e.name, when)
+        console.print(table)
 
-    output.emit(current.__dict__, render)
+    output.emit([e.__dict__ for e in found], render)
+
+
+@app.command("judges")
+def list_judges(
+    experiment: str = typer.Option(..., "--experiment", "-e", help="Which experiment's judges"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
+):
+    """List the judges registered against an experiment."""
+    if json_output:
+        output.set_json(True)
+    _init_client()
+    from corerun import genai
+
+    found = _called(lambda: genai.judges(experiment=experiment, workspace=workspace))
+
+    def render():
+        if not found:
+            console.print("[dim]No judges. Add one from the console to score these traces.[/dim]")
+            return
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Name")
+        table.add_column("Version", justify="right")
+        table.add_column("Kind")
+        for j in found:
+            import json as _json
+
+            try:
+                blob = _json.loads(j.serialized_scorer or "{}")
+            except ValueError:
+                blob = {}
+            kind = (
+                f"built-in · {blob['builtin_scorer_class']}"
+                if blob.get("builtin_scorer_class")
+                else "LLM judge"
+                if blob.get("instructions_judge_pydantic_data")
+                else "custom code"
+                if blob.get("call_source")
+                else "scorer"
+            )
+            table.add_row(j.name, str(j.version), kind)
+        console.print(table)
+
+    output.emit([j.__dict__ for j in found], render)

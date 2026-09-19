@@ -440,6 +440,20 @@ class CoreRunClient:
         """
         return self.request("PUT", path, json=json, workspace=workspace, **kwargs)
 
+    def patch(
+        self,
+        path: str,
+        json: Optional[Dict[str, Any]] = None,
+        workspace: Optional[str] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Make a PATCH request.
+
+        Here because the GenAI engine takes a trace's tags a pair at a time
+        over PATCH, which is the one place this client needs the verb.
+        """
+        return self.request("PATCH", path, json=json, workspace=workspace, **kwargs)
+
     def delete(
         self,
         path: str,
